@@ -11,6 +11,7 @@
 #include "aux_utils.h"
 #include "mem_aligned_file_reader.h"
 #include "utils.h"
+#include "pq_flash_index.h"
 
 #ifndef _WINDOWS
 #include <sys/mman.h>
@@ -127,17 +128,12 @@ float compute_active_recall(const uint32_t *result_tags,
     }
   }
   uint32_t match = 0;
-  tsl::robin_set<uint32_t> vis;
   for (uint32_t i = 0; i < result_count; i++) {
-    if (vis.find(result_tags[i]) != vis.end()) 
-      continue;
     match += (active_gs.find(result_tags[i]) != active_gs.end());
-    vis.insert(result_tags[i]);
   }
   return ((float) match / (float) result_count) * 100;
 }
 
-std::vector<float> vec_recall[100];
 // borrowed from tests/search_disk_index.cpp
 template<typename T, typename TagT = uint32_t>
 void search_disk_index(const std::string &             index_prefix_path,
@@ -224,7 +220,7 @@ void search_disk_index(const std::string &             index_prefix_path,
       mean_recall += query_recall;
     }
     mean_recall /= query_num;
-    vec_recall[test_id].push_back(mean_recall);
+
     float mean_latency = (float) diskann::get_mean_stats(
         stats, query_num,
         [](const diskann::QueryStats& stats) { return stats.total_us; });
@@ -318,7 +314,7 @@ void run_index_merger(const char *                    disk_in,
                                  dist, beam_width, range, l_index, alpha, maxc);
 
   std::cout << "Starting merge\n";
-  merger.optimized_merge();
+  merger.merge();
 
   std::cout << "Finished merging\n";
 }
@@ -425,13 +421,6 @@ void run_all_iters(const std::string &base_prefix,
     run_iter<T>(base, merge, mem_prefix, deleted_tags, active_tags,
                 inactive_tags, query_file, gs_file, data.get(), dist_cmp);
   }
-  for (size_t i = 0; i < ::Lvec.size(); i++) {
-    std::cout << "[";
-    for (auto j : vec_recall[i]) {
-      std::cout << j << ", ";
-    }
-    std::cout << "]";
-  }
 }
 
 int main(int argc, char **argv) {
@@ -459,9 +448,7 @@ int main(int argc, char **argv) {
   std::string data_bin(argv[arg_no++]);
   std::string query_bin(argv[arg_no++]);
   std::string gt_bin(argv[arg_no++]);
-  std::cout << gt_bin << std::endl;
   uint32_t    n_iters = (uint32_t) atoi(argv[arg_no++]);
-  std::cout << n_iters << std::endl;
   uint32_t    insert_count = (uint32_t) atoi(argv[arg_no++]);
   uint32_t    delete_count = (uint32_t) atoi(argv[arg_no++]);
   uint32_t    range = (uint32_t) atoi(argv[arg_no++]);
@@ -480,7 +467,7 @@ int main(int argc, char **argv) {
 
   // hard-coded params
   params[std::string("disk_search_node_cache_count")] = 200000;
-  params[std::string("disk_search_nthreads")] = 32;
+  params[std::string("disk_search_nthreads")] = 96;
   params[std::string("beam_width")] = 4;
   params[std::string("mem_l_index")] = 75;
   mem_alpha = 1.2;

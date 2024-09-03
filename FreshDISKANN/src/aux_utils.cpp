@@ -72,7 +72,7 @@ namespace diskann {
                           unsigned *our_results, unsigned dim_or,
                           unsigned                  recall_at,
                           tsl::robin_set<unsigned> &inactive_locations) {
-    double             total_recall = 0;
+    double             total_recall = 0, total_active = 0;
     std::set<unsigned> gt, res;
     bool               printed = false;
     for (size_t i = 0; i < num_queries; i++) {
@@ -86,6 +86,7 @@ namespace diskann {
       while (active_points_count < recall_at && cur_counter < dim_gs) {
         if (inactive_locations.find(gt_vec[cur_counter]) ==
             inactive_locations.end()) {
+          gt.insert(gt_vec[cur_counter]);
           active_points_count++;
         }
         cur_counter++;
@@ -97,11 +98,16 @@ namespace diskann {
         printed = true;
       }
       if (gs_dist != nullptr) {
-        tie_breaker = cur_counter - 1;
+        tie_breaker = cur_counter;
         float *gt_dist_vec = gs_dist + dim_gs * i;
         while (tie_breaker < dim_gs &&
-               gt_dist_vec[tie_breaker] == gt_dist_vec[cur_counter - 1])
+               gt_dist_vec[tie_breaker] == gt_dist_vec[cur_counter - 1]) {
+          if (inactive_locations.find(gt_vec[tie_breaker]) ==
+              inactive_locations.end()) {
+            gt.insert(gt_vec[tie_breaker]);
+          }
           tie_breaker++;
+        }
       }
       /*
          std::cout<<"ground_truth :: ";
@@ -112,17 +118,18 @@ namespace diskann {
                  }
                  std::cout<<std::endl;
       */
-      gt.insert(gt_vec, gt_vec + tie_breaker);
+      // gt.insert(gt_vec, gt_vec + tie_breaker);
       res.insert(res_vec, res_vec + recall_at);
       unsigned cur_recall = 0;
       for (auto &v : res) {
-        if (gt.find(v) != gt.end()) {
+        if (gt.find(v) != gt.end() && inactive_locations.find(v) == inactive_locations.end()) {
           cur_recall++;
         }
       }
       total_recall += cur_recall;
+      total_active += recall_at;
     }
-    return total_recall / (num_queries) * (100.0 / recall_at);
+    return total_recall / total_active * recall_at;
   }
 
   template<typename T>
@@ -704,6 +711,7 @@ namespace diskann {
 
     diskann::get_bin_metadata(dataFilePath, points_num, dim);
 
+    std::cout << points_num << " " << dim << std::endl;
     size_t num_pq_chunks =
         (size_t)(std::floor)(_u64(final_index_ram_limit / points_num));
 
@@ -754,6 +762,171 @@ namespace diskann {
     return true;
   }
 
+  template<typename T, typename TagT>
+  bool build_disk_index_with_tags(const char *dataFilePath, const char *indexFilePath,
+                        const char *    indexBuildParameters,
+                        diskann::Metric _compareMetric, const int kvecs) {
+    std::stringstream parser;
+    parser << std::string(indexBuildParameters);
+    std::string              cur_param;
+    std::vector<std::string> param_list;
+    while (parser >> cur_param)
+      param_list.push_back(cur_param);
+
+    if (param_list.size() != 5) {
+      std::cout
+          << "Correct usage of parameters is R (max degree) "
+             "L (indexing list size, better if >= R) B (RAM limit of final "
+             "index in "
+
+             "GB) M (memory limit while indexing) T (number of threads for "
+             "indexing)"
+          << std::endl;
+      return false;
+    }
+
+    std::string index_prefix_path(indexFilePath);
+    std::string pq_pivots_path = index_prefix_path + "_pq_pivots.bin";
+    std::string pq_compressed_vectors_path =
+        index_prefix_path + "_pq_compressed.bin";
+
+    std::string mem_index_path = index_prefix_path + "_mem.index";
+    std::string disk_index_path = index_prefix_path + "_disk.index";
+    std::string medoids_path = disk_index_path + "_medoids.bin";
+    std::string centroids_path = disk_index_path + "_centroids.bin";
+    std::string sample_base_prefix = index_prefix_path + "_sample";
+
+    unsigned R = (unsigned) atoi(param_list[0].c_str());
+    unsigned L = (unsigned) atoi(param_list[1].c_str());
+
+    double final_index_ram_limit = get_memory_budget(param_list[2]);
+    if (final_index_ram_limit <= 0) {
+      std::cerr << "Insufficient memory budget (or string was not in right "
+                   "format). Should be > 0."
+                << std::endl;
+      return false;
+    }
+    double indexing_ram_budget = (float) atof(param_list[3].c_str());
+    if (indexing_ram_budget <= 0) {
+      std::cerr << "Not building index. Please provide more RAM budget"
+                << std::endl;
+      return false;
+    }
+    _u32 num_threads = (_u32) atoi(param_list[4].c_str());
+
+    if (num_threads != 0) {
+      omp_set_num_threads(num_threads);
+      mkl_set_num_threads(num_threads);
+    }
+
+    std::cout << "Starting index build: R=" << R << " L=" << L
+              << " Query RAM budget: " << final_index_ram_limit
+              << " Indexing ram budget: " << indexing_ram_budget
+              << " T: " << num_threads << std::endl;
+
+    auto s = std::chrono::high_resolution_clock::now();
+
+    size_t points_num, dim;
+
+    diskann::get_bin_metadata(dataFilePath, points_num, dim);
+
+    if ((int)points_num < kvecs) {
+      std::cout << "Can't build index because number of file vectors isn't enough.\n";
+      return false;
+    }
+
+    size_t tmp_points_num = points_num;
+    points_num = kvecs;
+    std::cout << points_num << " " << dim << std::endl;
+    size_t num_pq_chunks =
+        (size_t)(std::floor)(_u64(final_index_ram_limit / points_num));
+
+    num_pq_chunks = num_pq_chunks <= 0 ? 1 : num_pq_chunks;
+    num_pq_chunks = num_pq_chunks > dim ? dim : num_pq_chunks;
+    num_pq_chunks =
+        num_pq_chunks > MAX_PQ_CHUNKS ? MAX_PQ_CHUNKS : num_pq_chunks;
+    // REMOVE
+    num_pq_chunks = 32;
+
+    std::cout << "Compressing " << dim << "-dimensional data into "
+              << num_pq_chunks << " bytes per vector." << std::endl;
+
+    size_t train_size, train_dim;
+    float *train_data;
+
+    double p_val = ((double) TRAINING_SET_SIZE_SMALL / (double) points_num);
+    // generates random sample and sets it to train_data and updates train_size
+    std::string cut_off_datapath = index_prefix_path + "_cut_off_data";
+    {
+      T *data = new T[tmp_points_num * dim];
+      diskann::load_bin<T>(dataFilePath, data, tmp_points_num, dim);
+      std::ofstream data_writer(cut_off_datapath.c_str(), std::ios::binary);
+      data_writer.write((char *) &points_num, sizeof(uint32_t));
+      data_writer.write((char *) &dim, sizeof(uint32_t));
+      data_writer.write((char *) data, points_num * dim * sizeof(T));
+      data_writer.close();
+    }
+    gen_random_slice<T>(cut_off_datapath, p_val, train_data, train_size, train_dim);
+
+    std::cout << "Training data loaded of size " << train_size << std::endl;
+
+    generate_pq_pivots(train_data, train_size, (uint32_t) dim, 256,
+                       (uint32_t) num_pq_chunks, NUM_KMEANS, pq_pivots_path);
+    generate_pq_data_from_pivots<T>(cut_off_datapath, 256, (uint32_t) num_pq_chunks,
+                                    pq_pivots_path, pq_compressed_vectors_path);
+
+    delete[] train_data;
+
+    train_data = nullptr;
+
+    diskann::build_merged_vamana_index<T>(
+        cut_off_datapath, _compareMetric, L, R, p_val, indexing_ram_budget,
+        mem_index_path, medoids_path, centroids_path);
+
+    diskann::create_disk_layout<T>(cut_off_datapath, mem_index_path,
+                                   disk_index_path);
+
+    double sample_sampling_rate = (150000.0 / points_num);
+
+    gen_random_slice<T>(cut_off_datapath, sample_base_prefix, sample_sampling_rate);
+    std::string disk_index_tag_path = index_prefix_path + "_disk.index.tags";
+    std::ofstream tag_writer(disk_index_tag_path.c_str(), std::ios::binary);
+    uint32_t ud1 = 1;
+    tag_writer.write((char *) &tmp_points_num, sizeof(uint32_t));
+    tag_writer.write((char *) &ud1, sizeof(uint32_t));
+    TagT *tag = new TagT[tmp_points_num];
+    for (int i = 0; i < (int)tmp_points_num; i++) {
+      if (i < kvecs) tag[i] = i;
+      else tag[i] = std::numeric_limits<TagT>::max();
+    }
+    tag_writer.write((char *)tag, tmp_points_num * sizeof(TagT));
+    tag_writer.close();
+    auto                          e = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = e - s;
+
+    std::cout << "Indexing time: " << diff.count() << "\n";
+
+    return true;
+  }
+  DISKANN_DLLEXPORT void transpose_pq_codes(uint8_t* pq_codes, int n, int nchunk, int group_size) {
+    //    assert(group_size * sizeof(uint8_t) * 8 == 512);
+    std::vector<uint8_t> buffer(nchunk * group_size, 0);
+    // todo：使用omp会引起并发问题，需要改一下代码
+//#pragma omp parallel for num_threads(32)
+    for(int i = 0; i < n; i += group_size) {
+        uint8_t* group_codes = pq_codes + i * nchunk;
+        int block_size = std::min(n - i, group_size);
+        std::memcpy(buffer.data(), group_codes, nchunk * block_size);
+        if(block_size != group_size) {
+            std::memset(buffer.data() + nchunk * block_size, 0, nchunk * (group_size - block_size));
+        }
+        for(int j = 0; j < block_size; j++) {
+            for(int k = 0; k < nchunk; k++) {
+                group_codes[k * group_size + j] = buffer[j * nchunk + k];
+            }
+        }
+    }
+  }
   template DISKANN_DLLEXPORT void create_disk_layout<int8_t>(
       const std::string base_file, const std::string mem_index_file,
       const std::string output_file);
@@ -797,6 +970,19 @@ namespace diskann {
   template DISKANN_DLLEXPORT bool build_disk_index<float>(
       const char *dataFilePath, const char *indexFilePath,
       const char *indexBuildParameters, diskann::Metric _compareMetric);
+  
+  template DISKANN_DLLEXPORT bool build_disk_index_with_tags<int8_t, uint32_t>(
+      const char *dataFilePath, const char *indexFilePath,
+      const char *indexBuildParameters, diskann::Metric _compareMetric,
+      const int kvecs);
+  template DISKANN_DLLEXPORT bool build_disk_index_with_tags<uint8_t, uint32_t>(
+      const char *dataFilePath, const char *indexFilePath,
+      const char *indexBuildParameters, diskann::Metric _compareMetric,
+      const int kvecs);
+  template DISKANN_DLLEXPORT bool build_disk_index_with_tags<float, uint32_t>(
+      const char *dataFilePath, const char *indexFilePath,
+      const char *indexBuildParameters, diskann::Metric _compareMetric,
+      const int kvecs);
 
   template DISKANN_DLLEXPORT int build_merged_vamana_index<int8_t>(
       std::string base_file, diskann::Metric _compareMetric, unsigned L,

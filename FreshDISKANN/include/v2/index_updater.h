@@ -18,7 +18,7 @@ extern std::string TMP_FOLDER;
 
 namespace diskann {
   template<typename T, typename TagT=uint32_t>
-  class IndexMerger {
+  class IndexUpdater {
     public:
       // constructor to read a constructed index, allocated IDs
       // disk_in : SSD-DiskANN index to merge into
@@ -31,10 +31,10 @@ namespace diskann {
       // range : max out-degree
       // l_index : L param for indexing
       // maxc : max num of candidates to consider while pruning
-      IndexMerger(const char* disk_in, const std::vector<std::string> &mem_in, const char* disk_out,
+      IndexUpdater(const char* disk_in, const std::vector<std::string> &mem_in, const char* disk_out,
                   const char* deleted_tags, const uint32_t ndims, Distance<T>* dist, const uint32_t beam_width,
                   const uint32_t range, const uint32_t l_index, const float alpha, const uint32_t maxc);
-      ~IndexMerger();
+      ~IndexUpdater();
 
       // merge all memory indices into the disk index and write out new disk index
       void merge();

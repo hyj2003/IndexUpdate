@@ -183,7 +183,7 @@ void exact_knn(const size_t dim, const size_t k,
 template<typename T>
 inline _u32 get_num_parts(const char *filename) {
   std::ifstream reader(filename, std::ios::binary);
-  std::cout << "Reading bin file " << filename << " ...\n";
+  // std::cout << "Reading bin file " << filename << " ...\n";
   int npts_i32, ndims_i32;
   reader.read((char *) &npts_i32, sizeof(int));
   reader.read((char *) &ndims_i32, sizeof(int));
@@ -200,7 +200,7 @@ template<typename T>
 inline void load_bin_as_float(const char *filename, float *&data, size_t &npts,
                               size_t &ndims, int part_num) {
   std::ifstream reader(filename, std::ios::binary);
-  std::cout << "Reading bin file " << filename << " ...\n";
+  // std::cout << "Reading bin file " << filename << " ...\n";
   int npts_i32, ndims_i32;
   reader.read((char *) &npts_i32, sizeof(int));
   reader.read((char *) &ndims_i32, sizeof(int));

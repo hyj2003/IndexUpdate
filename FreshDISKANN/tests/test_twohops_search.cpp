@@ -2,7 +2,7 @@
 #include <cstring>
 #include <iomanip>
 #include <omp.h>
-#include <pq_flash_index.h>
+#include <fresh_pq_flash_index.h>
 #include <set>
 #include <string.h>
 #include <time.h>
@@ -69,34 +69,22 @@ int search_disk_index(int argc, char** argv) {
   std::string result_output_prefix(argv[9]);
 
   std::string disk_index_tag_file = disk_index_file + ".tags";
-
+  std::string deleted_tags_file = std::string(argv[10]);
   tsl::robin_set<uint32_t> inactive_tags;
-
-  // if (file_exists(disk_index_tag_file)) {
-  //   for (uint32_t i = 0; i < 1000000; i++)
-  //     inactive_tags.insert(i);
-  // }
-  uint32_t* tag_data;
-  size_t    tag_num, tag_dim;
-  // diskann::load_bin<uint32_t>(disk_index_tag_file, tag_data, tag_num, tag_dim);
-  // for (size_t i = 0; i < tag_num; i++)
-  //   inactive_tags.erase(tag_data[i]);
-  // delete[] tag_data;
-  // /*
-  //       std::ifstream tag_reader(disk_index_tag_file);
-  //       uint32_t      cur_i = 0;
-  //       uint32_t      cur_tag;
-  //       while (tag_reader >> cur_tag) {
-  //         inactive_tags.erase(cur_tag);
-  //         cur_i++;
-  //       }
-  //       tag_reader.close();
-  //       */
+  
+  std::cout << "Reading deleted tag list from " << deleted_tags_file << "\n";
+  size_t tag_num, tag_dim;
+  uint32_t * tag_data;
+  diskann::load_bin<uint32_t>(deleted_tags_file, tag_data, tag_num, tag_dim);
+  for(size_t i = 0; i < tag_num; i++)
+  {
+    inactive_tags.insert(*(tag_data + i));
+  }
   std::cout << "Loaded " << tag_num << " tags from " << disk_index_tag_file
             << ", # inactive tags:" << inactive_tags.size() << std::endl;
   bool calc_recall_flag = false;
 
-  for (int ctr = 10; ctr < argc; ctr++) {
+  for (int ctr = 11; ctr < argc; ctr++) {
     _u64 curL = std::atoi(argv[ctr]);
     if (curL >= recall_at)
       Lvec.push_back(curL);
@@ -117,10 +105,10 @@ int search_disk_index(int argc, char** argv) {
   diskann::load_aligned_bin<T>(query_bin, query, query_num, query_dim,
                                query_aligned_dim);
   if (file_exists(truthset_bin)) {
-    //    diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
-    //                           &gt_tags);
-    diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
-                           &gt_tags_tmp);
+       diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
+                              &gt_tags);
+    // diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
+    //                        &gt_tags_tmp);
     if (gt_num != query_num) {
       std::cout << "Error. Mismatch in number of queries and ground truth data"
                 << std::endl;
@@ -140,10 +128,10 @@ int search_disk_index(int argc, char** argv) {
 //  reader.reset(new diskann::MemAlignedFileReader());
 #endif
 
-  std::unique_ptr<diskann::PQFlashIndex<T>> _pFlashIndex(
-      new diskann::PQFlashIndex<T>(reader));
+  std::unique_ptr<diskann::FreshPQFlashIndex<T>> _pFlashIndex(
+      new diskann::FreshPQFlashIndex<T>(reader));
   int res = _pFlashIndex->load(num_threads, pq_prefix.c_str(),
-                               disk_index_file.c_str(), false);
+                               disk_index_file.c_str(), true);
   if (res != 0) {
     return res;
   }
@@ -152,11 +140,9 @@ int search_disk_index(int argc, char** argv) {
   std::cout << "Caching " << num_nodes_to_cache << " BFS nodes around medoid(s)"
             << std::endl;
   _pFlashIndex->cache_bfs_levels(num_nodes_to_cache, node_list);
-  //  std::cout << "WARNING: not generating cache list from sample queries\n";
-  /*
-  _pFlashIndex->generate_cache_list_from_sample_queries(
-      warmup_query_file, 15, 6, num_nodes_to_cache, node_list); */
+  
   _pFlashIndex->load_cache_list(node_list);
+  _pFlashIndex->load_deleted_list(deleted_tags_file.c_str());
   node_list.clear();
   node_list.shrink_to_fit();
 
@@ -191,19 +177,127 @@ int search_disk_index(int argc, char** argv) {
     std::vector<uint64_t> warmup_result_ids_64(warmup_num, 0);
     std::vector<float>    warmup_result_dists(warmup_num, 0);
 
-#pragma omp parallel for schedule(dynamic, 1)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(10)
     for (_s64 i = 0; i < (int64_t) warmup_num; i++) {
       _pFlashIndex->cached_beam_search(warmup + (i * warmup_aligned_dim), 1,
                                        warmup_L,
                                        warmup_result_ids_64.data() + (i * 1),
                                        warmup_result_dists.data() + (i * 1), 4);
+    //   _pFlashIndex->filtered_beam_search(warmup + (i * warmup_aligned_dim), 1,
+    //                                    warmup_L,
+    //                                    warmup_result_ids_64.data() + (i * 1),
+    //                                    warmup_result_dists.data() + (i * 1), 4);
     }
     std::cout << "..done" << std::endl;
   }
 
-  std::cout.setf(std::ios_base::fixed, std::ios_base::floatfield);
-  std::cout.precision(2);
+//   std::cout.setf(std::ios_base::fixed, std::ios_base::floatfield);
+//   std::cout.precision(2);
+//   {
+//   std::string recall_string = "Recall@" + std::to_string(recall_at);
+//   std::cout << std::setw(6) << "L" << std::setw(12) << "Beamwidth"
+//             << std::setw(16) << "QPS" << std::setw(16) << "Mean Latency"
+//             << std::setw(16) << "99.9 Latency" << std::setw(16) << "Mean IOs"
+//             << std::setw(16) << "CPU (s)";
+//   if (calc_recall_flag) {
+//     std::cout << std::setw(16) << recall_string << std::endl;
+//   } else
+//     std::cout << std::endl;
+//   std::cout << "==============================================================="
+//                "==========================================="
+//             << std::endl;
 
+//   std::vector<std::vector<uint32_t>> query_result_ids(Lvec.size());
+//   std::vector<std::vector<uint32_t>> query_result_tags(Lvec.size());
+//   std::vector<std::vector<float>>    query_result_dists(Lvec.size());
+
+//   uint32_t optimized_beamwidth = 2;
+
+  //  query_num = 1;
+
+//   for (uint32_t test_id = 0; test_id < Lvec.size(); test_id++) {
+//     _u64 L = Lvec[test_id];
+
+//     if (beamwidth <= 0) {
+//       std::cerr << "WARNING : Beamwidth tuning disabled.\n";
+//       optimized_beamwidth = 4;
+//       //    std::cout<<"Tuning beamwidth.." << std::endl;
+//       // optimized_beamwidth =
+//       //     optimize_beamwidth(_pFlashIndex, warmup, warmup_num,
+//       //                       warmup_aligned_dim, (_u32) L,
+//       //                       optimized_beamwidth);
+//     } else
+//       optimized_beamwidth = beamwidth;
+
+//     query_result_ids[test_id].resize(recall_at * query_num);
+//     query_result_dists[test_id].resize(recall_at * query_num);
+//     query_result_tags[test_id].resize(recall_at * query_num);
+
+//     diskann::QueryStats* stats = new diskann::QueryStats[query_num];
+
+//     std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
+//     diskann::Timer timer;
+// #pragma omp               parallel for schedule(dynamic, 1) //num_threads(1)
+//     for (_s64 i = 0; i < (int64_t) query_num; i++) {
+//       _pFlashIndex->cached_beam_search(
+//           query + (i * query_aligned_dim), recall_at, L,
+//           query_result_ids_64.data() + (i * recall_at),
+//           query_result_dists[test_id].data() + (i * recall_at),
+//           optimized_beamwidth, stats + i, nullptr,
+//           query_result_tags[test_id].data() + (i * recall_at));
+//     }
+//     double diff = (double) timer.elapsed() / 1000 / 1000;
+//     float qps = (float) ((1.0 * query_num) / (1.0 * diff));
+
+//     diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(),
+//                                                query_result_ids[test_id].data(),
+//                                                query_num, recall_at);
+
+//     float mean_latency = (float) diskann::get_mean_stats(
+//         stats, query_num,
+//         [](const diskann::QueryStats& stats) { return stats.total_us; });
+
+//     float latency_999 = (float) diskann::get_percentile_stats(
+//         stats, query_num, 0.999,
+//         [](const diskann::QueryStats& stats) { return stats.total_us; });
+
+//     float mean_ios = (float) diskann::get_mean_stats(
+//         stats, query_num,
+//         [](const diskann::QueryStats& stats) { return stats.n_ios; });
+
+//     float mean_cpuus = (float) diskann::get_mean_stats(
+//         stats, query_num,
+//         [](const diskann::QueryStats& stats) { return stats.cpu_us; });
+//     delete[] stats;
+
+//     float recall = 0;
+//     if (calc_recall_flag) {
+//       if (gt_tags == nullptr) {
+//         std::cout << "Testing recall using IDs.\n";
+//         recall = (float) diskann::calculate_recall(
+//             (_u32) query_num, gt_ids, gt_dists, (_u32) gt_dim,
+//             query_result_ids[test_id].data(), (_u32) recall_at,
+//             (_u32) recall_at);
+//       } else {
+//         std::cout << "Testing recall using tags.\n";
+//         recall = (float) diskann::calculate_recall(
+//             (_u32) query_num, gt_tags, gt_dists, (_u32) gt_dim,
+//             query_result_tags[test_id].data(), (_u32) recall_at,
+//             (_u32) recall_at, inactive_tags);
+//       }
+//     }
+
+//     std::cout << std::setw(6) << L << std::setw(12) << optimized_beamwidth
+//               << std::setw(16) << qps << std::setw(16) << mean_latency
+//               << std::setw(16) << latency_999 << std::setw(16) << mean_ios
+//               << std::setw(16) << mean_cpuus;
+//     if (calc_recall_flag) {
+//       std::cout << std::setw(16) << recall << std::endl;
+//     } else
+//       std::cout << std::endl;
+//   }
+//   }
+  {
   std::string recall_string = "Recall@" + std::to_string(recall_at);
   std::cout << std::setw(6) << "L" << std::setw(12) << "Beamwidth"
             << std::setw(16) << "QPS" << std::setw(16) << "Mean Latency"
@@ -246,19 +340,18 @@ int search_disk_index(int argc, char** argv) {
     diskann::QueryStats* stats = new diskann::QueryStats[query_num];
 
     std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
-    auto                  s = std::chrono::high_resolution_clock::now();
-#pragma omp               parallel for schedule(dynamic, 1)  // num_threads(1)
+    diskann::Timer timer;
+#pragma omp               parallel for schedule(dynamic, 1) //num_threads(1)
     for (_s64 i = 0; i < (int64_t) query_num; i++) {
-      _pFlashIndex->cached_beam_search(
+      _pFlashIndex->filtered_beam_search(
           query + (i * query_aligned_dim), recall_at, L,
           query_result_ids_64.data() + (i * recall_at),
           query_result_dists[test_id].data() + (i * recall_at),
           optimized_beamwidth, stats + i, nullptr,
           query_result_tags[test_id].data() + (i * recall_at));
     }
-    auto                          e = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = e - s;
-    float qps = (float) ((1.0 * query_num) / (1.0 * diff.count()));
+    double diff = (double) timer.elapsed() / 1000 / 1000;
+    float qps = (float) ((1.0 * query_num) / (1.0 * diff));
 
     diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(),
                                                query_result_ids[test_id].data(),
@@ -307,26 +400,26 @@ int search_disk_index(int argc, char** argv) {
     } else
       std::cout << std::endl;
   }
-
-  std::cout << "Done searching. Now saving results " << std::endl;
-  _u64 test_id = 0;
-  for (auto L : Lvec) {
-    std::string cur_result_path =
-        result_output_prefix + "_" + std::to_string(L) + "_idx_uint32.bin";
-    diskann::save_bin<_u32>(cur_result_path, query_result_ids[test_id].data(),
-                            query_num, recall_at);
-
-    cur_result_path =
-        result_output_prefix + "_" + std::to_string(L) + "_tags_uint32.bin";
-    diskann::save_bin<_u32>(cur_result_path, query_result_tags[test_id].data(),
-                            query_num, recall_at);
-    cur_result_path =
-        result_output_prefix + "_" + std::to_string(L) + "_dists_float.bin";
-    diskann::save_bin<float>(cur_result_path,
-                             query_result_dists[test_id++].data(), query_num,
-                             recall_at);
   }
-  diskann::aligned_free(query);
+//   std::cout << "Done searching. Now saving results " << std::endl;
+//   _u64 test_id = 0;
+//   for (auto L : Lvec) {
+//     std::string cur_result_path =
+//         result_output_prefix + "_" + std::to_string(L) + "_idx_uint32.bin";
+//     diskann::save_bin<_u32>(cur_result_path, query_result_ids[test_id].data(),
+//                             query_num, recall_at);
+
+//     cur_result_path =
+//         result_output_prefix + "_" + std::to_string(L) + "_tags_uint32.bin";
+//     diskann::save_bin<_u32>(cur_result_path, query_result_tags[test_id].data(),
+//                             query_num, recall_at);
+//     cur_result_path =
+//         result_output_prefix + "_" + std::to_string(L) + "_dists_float.bin";
+//     diskann::save_bin<float>(cur_result_path,
+//                              query_result_dists[test_id++].data(), query_num,
+//                              recall_at);
+//   }
+//   diskann::aligned_free(query);
   if (warmup != nullptr)
     diskann::aligned_free(warmup);
   delete[] gt_ids;
@@ -335,9 +428,8 @@ int search_disk_index(int argc, char** argv) {
   delete[] gt_dists;
   return 0;
 }
-
 int main(int argc, char** argv) {
-  if (argc < 11) {
+  if (argc < 12) {
     std::cout
         << "Usage: " << argv[0]
         << "  [index_type<float/int8/uint8>]  [index_prefix_path] "

@@ -27,7 +27,7 @@ void run(const char* disk_in, const std::vector<std::string>& mem_in,
                                  dist, beam_width, range, l_index, alpha, maxc);
 
   std::cout << "Starting merge\n";
-  merger.merge();
+  merger.optimized_merge();
 
   std::cout << "Finished merging\n";
 }

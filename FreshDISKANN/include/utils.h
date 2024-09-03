@@ -54,7 +54,45 @@ typedef uint8_t  _u8;
 typedef int8_t   _s8;
 
 namespace diskann {
+  inline void *alloc64B(size_t nbytes) {
+    size_t len = (nbytes + (1 << 6) - 1) >> 6 << 6;
+    auto p = std::aligned_alloc(1 << 6, len);
+    std::memset(p, 0, len);
+    return p;
+  }
+  template <typename Block = uint64_t> struct Bitset {
+    constexpr static int block_size = sizeof(Block) * 8;
+    int nbytes;
+    Block *data;
+    explicit Bitset(int n)
+        : nbytes((n + block_size - 1) / block_size * sizeof(Block)),
+          data((uint64_t *)alloc64B(nbytes)) {
+      memset(data, 0, nbytes);
+    }
+    ~Bitset() { free(data); }
+    void set(int i) {
+      data[i / block_size] |= (Block(1) << (i & (block_size - 1)));
+    }
+    bool get(int i) {
+      return (data[i / block_size] >> (i & (block_size - 1))) & 1;
+    }
 
+    void *block_address(int i) { return data + i / block_size; }
+  };
+  struct VisitedList {
+    Bitset<uint64_t> high, low;
+    static constexpr int B = (1 << 12) - 1;
+    VisitedList() = delete;
+    int cnt = 0;
+    explicit VisitedList(int n) : high(B + 1), low(n) {}
+    bool get(int i) {
+      return high.get(i & B) && low.get(i);
+    }
+    void set(int i) {
+      high.set(i & B);
+      low.set(i);
+    }
+  };
   enum Metric { L2 = 0, INNER_PRODUCT = 1, FAST_L2 = 2, PQ = 3 };
 
   DISKANN_DLLEXPORT float calc_recall_set_tags(
@@ -114,6 +152,7 @@ namespace diskann {
   inline void get_bin_metadata(const std::string &bin_file, size_t &nrows,
                                size_t &ncols) {
     std::ifstream reader(bin_file.c_str(), std::ios::binary);
+    // std::cout << reader.good() << std::endl;
     uint32_t      nrows_32, ncols_32;
     reader.read((char *) &nrows_32, sizeof(uint32_t));
     reader.read((char *) &ncols_32, sizeof(uint32_t));
@@ -127,8 +166,8 @@ namespace diskann {
                        size_t &dim) {
     _u64            read_blk_size = 64 * 1024 * 1024;
     cached_ifstream reader(bin_file, read_blk_size);
-    //    std::cout << "Reading bin file " << bin_file.c_str() << " ..." <<
-    //    std::endl;
+      //  std::cout << "Reading bin file " << bin_file.c_str() << " ..." <<
+      //  std::endl;
     size_t actual_file_size = reader.get_file_size();
 
     int npts_i32, dim_i32;
@@ -137,9 +176,9 @@ namespace diskann {
     npts = (unsigned) npts_i32;
     dim = (unsigned) dim_i32;
 
-    //    std::cout << "Metadata: #pts = " << npts << ", #dims = " << dim <<
-    //    "..."
-    //              << std::endl;
+      //  std::cout << "Metadata: #pts = " << npts << ", #dims = " << dim <<
+      //  "..."
+      //            << std::endl;
 
     size_t expected_actual_file_size =
         npts * dim * sizeof(T) + 2 * sizeof(uint32_t);
@@ -153,7 +192,8 @@ namespace diskann {
       throw diskann::ANNException(stream.str(), -1, __FUNCSIG__, __FILE__,
                                   __LINE__);
     }
-
+    // std::cout << "Finish bin file " << bin_file.c_str() << " ..." <<
+    //    std::endl;
     data = new T[npts * dim];
     reader.read((char *) data, npts * dim * sizeof(T));
     //    std::cout << "Finished reading bin file." << std::endl;
@@ -174,9 +214,8 @@ namespace diskann {
     npts = (unsigned) npts_i32;
     dim = (unsigned) dim_i32;
 
-    //    std::cout << "Metadata: #pts = " << npts << ", #dims = " << dim <<
-    //    "..."
-    //              << std::endl;
+       std::cout << "Metadata: #pts = " << npts << ", #dims = " << dim << " from " 
+                 << bin_file << " with size " << actual_file_size << " ..." << std::endl;
 
     size_t expected_actual_file_size =
         2 * npts * dim * sizeof(uint32_t) + 2 * sizeof(uint32_t);
@@ -198,10 +237,11 @@ namespace diskann {
     dists = new float[npts * dim];
     reader.read((char *) dists, npts * dim * sizeof(float));
     if (actual_file_size == with_tags_actual_file_size) {
-      //      std::cout << "Loading tags for groundtruth.\n";
+           std::cout << "Loading tags for groundtruth.\n";
       *tags = new uint32_t[npts * dim];
       reader.read((char *) *tags, npts * dim * sizeof(uint32_t));
     }
+    std::cout << "Loaded.\n";
   }
 
   template<typename T>

@@ -83,10 +83,18 @@ namespace diskann {
                                           const char *    indexFilePath,
                                           const char *    indexBuildParameters,
                                           diskann::Metric _compareMetric);
+  template<typename T, typename TagT>
+  DISKANN_DLLEXPORT bool build_disk_index_with_tags(const char *    dataFilePath,
+                                          const char *    indexFilePath,
+                                          const char *    indexBuildParameters,
+                                          diskann::Metric _compareMetric, const int kvecs);
 
   template<typename T>
   DISKANN_DLLEXPORT void create_disk_layout(const std::string base_file,
                                             const std::string mem_index_file,
                                             const std::string output_file);
+
+    // todo: pq_codes应该按照group_size×nchunk对齐，pq_codes的内存在load_bin_impl函数中分配
+  DISKANN_DLLEXPORT void transpose_pq_codes(uint8_t* pq_codes, int n, int nchunk, int group_size);
 
 }  // namespace diskann

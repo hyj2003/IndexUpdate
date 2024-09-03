@@ -521,7 +521,7 @@ namespace diskann {
       else
         num_tags = load_tag(tag_file_name);
       if (num_tags != _nd) {
-        std::cout << "#tags loaded is not equal to _nd. Exiting" << std::endl;
+        std::cout << "#tags loaded is not equal to _nd. Exiting " << num_tags << " " << _nd << std::endl;
         exit(-1);
       }
     }

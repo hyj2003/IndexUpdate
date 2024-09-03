@@ -24,18 +24,20 @@
 
 #define NUM_INSERT_THREADS 31
 #define NUM_DELETE_THREADS 1
-#define NUM_SEARCH_THREADS 30
-
+#define NUM_SEARCH_THREADS 1
+std::vector<float> latency;
+std::vector<float> vec_recall;
 template<typename T, typename TagT>
 void sync_search_kernel(
     T* query, size_t query_num, size_t query_aligned_dim, const int recall_at,
     std::vector<_u64> Lvec, diskann::SyncIndex<T, TagT>& sync_index,
     const std::string&       truthset_file,
     tsl::robin_set<unsigned> delete_list = tsl::robin_set<unsigned>()) {
-  unsigned* gt_ids = NULL;
-  float*    gt_dists = NULL;
+  unsigned* gt_ids = nullptr;
+  unsigned* gt_tags = nullptr;
+  float*    gt_dists = nullptr;
   size_t    gt_num, gt_dim;
-  diskann::load_truthset(truthset_file, gt_ids, gt_dists, gt_num, gt_dim);
+  diskann::load_truthset(truthset_file, gt_ids, gt_dists, gt_num, gt_dim, &gt_tags);
 
   //  _u64 rnd_query = rand() % query_num;
 
@@ -66,14 +68,14 @@ void sync_search_kernel(
 #pragma omp             parallel for num_threads(NUM_SEARCH_THREADS)
     for (int64_t i = 0; i < (int64_t) query_num; i++) {
       auto qs = std::chrono::high_resolution_clock::now();
-      sync_index.search_async(query + i * query_aligned_dim, recall_at,
+      sync_index.search_sync(query + i * query_aligned_dim, recall_at,
                               (_u32) L, query_result_tags + i * recall_at,
                               query_result_dists + i * recall_at);
 
       auto qe = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double> diff = qe - qs;
       latency_stats[i] = diff.count() * 1000;
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      // std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     auto e = std::chrono::high_resolution_clock::now();
 
@@ -92,6 +94,9 @@ void sync_search_kernel(
                      (float) query_num
               << std::setw(15)
               << (float) latency_stats[(_u64)(0.999 * query_num)];
+    latency.push_back(std::accumulate(latency_stats.begin(), latency_stats.end(), 0) /
+                   (float) query_num);
+    vec_recall.push_back(recall);
     if (delete_list.size() != 0) {
       std::cout << std::setw(12) << recall << std::endl;
     } else
@@ -292,6 +297,16 @@ void test(const std::string& data_path, const unsigned L_mem,
     std::cout << "Index size: " << sync_index.return_nd()
               << ", #active: " << active_tags.size()
               << ", #inactive: " << inactive_tags.size() << std::endl;
+    for (int i = 0; i < (int)latency.size(); i++) {
+      if (i == 0) std::cout << "[";
+      std::cout << latency[i] << ", ";
+      if (i == (int)latency.size() - 1) std::cout << "]\n";
+    }
+    for (int i = 0; i < (int)vec_recall.size(); i++) {
+      if (i == 0) std::cout << "[";
+      std::cout << vec_recall[i] << ", ";
+      if (i == (int)vec_recall.size() - 1) std::cout << "]\n";
+    }
   }
   delete[] data_load;
 }

@@ -1,0 +1,50 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug",
+            "program": "${workspaceFolder}/build/FreshDISKANN/tests/test_twohops_search",
+            "args": ["uint8",
+                     "/data/FreshIndex/sift/2hops/disk_index",
+                     "200000",
+                     "10",
+                     "0",
+                     "/data/sift10M/sift10M.q",
+                     "/data/sift10M/sift10M.gt1000",
+                     "100",
+                     "/data/FreshIndex/sift/2hops/result",
+                     "/data/FreshIndex/sift/2hops/delete_list",
+                     "100",
+                     "150",
+                     "200",],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+    // "configurations": [
+    //     {
+    //         "type": "lldb",
+    //         "request": "launch",
+    //         "name": "Debug",
+    //         "program": "${workspaceFolder}/build/FreshDISKANN/tests/test_index_merger_steady_state",
+    //         "args": ["float",
+    //                  "/data/FreshIndex/sift/base",
+    //                  "/data/FreshIndex/sift/base/disk_index",
+    //                  "/data/FreshIndex/sift/base/merged",
+    //                  "/data/FreshIndex/sift/base/mem_data_0",
+    //                  "/data/FreshIndex/sift/base/delete_list",
+    //                  "/data/sift1M/sift_base.fbin",
+    //                  "/data/sift1M/sift_query.fbin",
+    //                  "/data/sift1M/sift_gt1000.fbin",
+    //                  "1",
+    //                  "40000",
+    //                  "40000",
+    //                  "64",
+    //                  "100",
+    //                  "100",
+    //                  "150"],
+    //         "cwd": "${workspaceFolder}"
+    //     }
+    // ]
+}

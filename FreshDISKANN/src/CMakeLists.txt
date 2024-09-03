@@ -7,9 +7,10 @@ else()
 	#file(GLOB CPP_SOURCES *.cpp)
 	set(CPP_SOURCES ann_exception.cpp aux_utils.cpp index.cpp
         linux_aligned_file_reader.cpp math_utils.cpp memory_mapper.cpp
-        partition_and_pq.cpp pq_flash_index.cpp shard.cpp sync_index.cpp
+        partition_and_pq.cpp pq_flash_index.cpp fresh_pq_flash_index.cpp 
+		shard.cpp sync_index.cpp
         v2/graph_delta.cpp v2/index_merger.cpp v2/mem_aligned_file_reader.cpp
-        v2/merge_insert.cpp)
+        v2/merge_insert.cpp v2/index_updater.cpp)
 	add_library(${PROJECT_NAME} ${CPP_SOURCES})
 	add_library(${PROJECT_NAME}_s STATIC ${CPP_SOURCES})
 endif()

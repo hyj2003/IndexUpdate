@@ -26,17 +26,21 @@
 #define NUM_DELETE_THREADS 4
 #define NUM_SEARCH_THREADS 4
 
+std::vector<float> latency;
+std::vector<float> vec_recall;
 template<typename T, typename TagT>
 void sync_search_kernel(T* query, size_t query_num, size_t query_aligned_dim,
                         const int recall_at, _u64    L,
                         diskann::SyncIndex<T, TagT>& sync_index,
                         const std::string&    truthset_file,
                         tsl::robin_set<TagT>& inactive_tags) {
+  std::cout << "Recall_at " << recall_at << " L " << L << std::endl;
   unsigned* gt_ids = NULL;
   float*    gt_dists = NULL;
+  uint32_t* gt_tags = nullptr;
   size_t    gt_num, gt_dim;
-  diskann::load_truthset(truthset_file, gt_ids, gt_dists, gt_num, gt_dim);
-
+  diskann::load_truthset(truthset_file, gt_ids, gt_dists, gt_num, gt_dim, &gt_tags);
+  std::cout << "Truthset has been loaded." << std::endl;
   //  query_num = 1;
 
   float* query_result_dists = new float[recall_at * query_num];
@@ -93,7 +97,9 @@ void sync_search_kernel(T* query, size_t query_num, size_t query_aligned_dim,
                    (float) query_num
             << std::setw(15) << (float) latency_stats[(_u64)(0.999 * query_num)]
             << std::setw(12) << recall << std::endl;
-
+  latency.push_back(std::accumulate(latency_stats.begin(), latency_stats.end(), 0) /
+                   (float) query_num);
+  vec_recall.push_back(recall);
   delete[] query_result_dists;
   delete[] query_result_tags;
 }
@@ -241,6 +247,16 @@ void test(const std::string& data_path, const unsigned L_mem,
   std::cout << "Merge complete. Now searching..." << std::endl;
   sync_search_kernel(query, query_num, query_aligned_dim, recall_at, Lsearch,
                      sync_index, truthset_file, dummy_set);
+  for (int i = 0; i < (int)latency.size(); i++) {
+    if (i == 0) std::cout << "[";
+    std::cout << latency[i] << ", ";
+    if (i == (int)latency.size() - 1) std::cout << "]\n";
+  }
+  for (int i = 0; i < (int)vec_recall.size(); i++) {
+    if (i == 0) std::cout << "[";
+    std::cout << vec_recall[i] << ", ";
+    if (i == (int)vec_recall.size() - 1) std::cout << "]\n";
+  }
   delete[] data_load;
 }
 

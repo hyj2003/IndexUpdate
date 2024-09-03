@@ -3,7 +3,7 @@
 #include "tsl/robin_map.h"
 #include "tsl/robin_set.h"
 #include "utils.h"
-#include "v2/index_merger.h"
+#include "v2/index_updater.h"
 #include "mem_aligned_file_reader.h"
 #include <algorithm>
 #include <cassert>
@@ -30,7 +30,7 @@ std::string TMP_FOLDER;
 
 namespace diskann {
   template<typename T, typename TagT>
-  IndexMerger<T, TagT>::IndexMerger(const char* disk_in, const std::vector<std::string> &mem_in, const char* disk_out, 
+  IndexUpdater<T, TagT>::IndexUpdater(const char* disk_in, const std::vector<std::string> &mem_in, const char* disk_out, 
                            const char* deleted_tags_file, const uint32_t ndims, Distance<T>* dist, const uint32_t beam_width,
                            const uint32_t range, const uint32_t l_index, const float alpha, const uint32_t maxc) {
 	  std::cout << l_index << " , " << range << " , " << alpha << " , " << maxc << " , " << beam_width << std::endl;
@@ -122,13 +122,7 @@ namespace diskann {
       }
       this->mem_tags.push_back(std::move(index_tags));
     }
-/*    std::ifstream deleted_tag_reader(deleted_tags_file);
-    TagT tag;
-    while(deleted_tag_reader >> tag) {
-      this->deleted_tags.insert(tag);
-    }
-    deleted_tag_reader.close();
-    */
+
     std::cout << "Reading deleted tag list from " << deleted_tags_file << "\n";
     size_t tag_num, tag_dim;
     TagT * tag_data;
@@ -138,7 +132,7 @@ namespace diskann {
     {
         this->deleted_tags.insert(*(tag_data + i));
     }
-
+    // this->disk_index->load_deleted_list(deleted_tags_file);
     delete[] tag_data;
     std::cout << "Allocating thread scratch space -- " << PER_THREAD_BUF_SIZE / (1<<20) << " MB / thread.\n";
     alloc_aligned((void**) &this->thread_pq_scratch, MAX_N_THREADS * PER_THREAD_BUF_SIZE, SECTOR_LEN);
@@ -154,7 +148,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  IndexMerger<T, TagT>::~IndexMerger() {
+  IndexUpdater<T, TagT>::~IndexUpdater() {
     // release scratch alloc memory
     // delete this->fp_alloc;
     // delete this->pq_alloc;
@@ -177,7 +171,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::process_inserts_pq() {
+  void IndexUpdater<T, TagT>::process_inserts_pq() {
       Timer total_insert_timer;
     this->insert_times.resize(MAX_N_THREADS, 0.0);
     this->delta_times.resize(MAX_N_THREADS, 0.0);
@@ -226,7 +220,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::process_inserts() {
+  void IndexUpdater<T, TagT>::process_inserts() {
     this->disk_index->cache_hit = 0;
     this->disk_index->total_travel = 0;
       Timer total_insert_timer;
@@ -284,7 +278,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::optimized_process_inserts() {
+  void IndexUpdater<T, TagT>::optimized_process_inserts() {
     this->disk_index->cache_hit = 0;
     this->disk_index->total_travel = 0;
       Timer total_insert_timer;
@@ -342,13 +336,6 @@ namespace diskann {
           cnt[j]++;
         }
       }
-      sort(cnt.begin(), cnt.end(), [](_u32 i, _u32 j){ return i > j; });
-      std::cout << "Total: " << count << std::endl;
-      std::cout << "Top 100 Degree: ";
-      for (int i = 0; i < 100; i++) {
-        std::cout << cnt[i] << " ";
-      }
-      std::cout << std::endl;
       std::cout << "max in-degree: " << *std::max_element(cnt.begin(), cnt.end()) 
                 << " min in-degree: " << *std::min_element(cnt.begin(), cnt.end())
                 << std::endl;
@@ -451,7 +438,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::insert_mem_vec(const T* mem_vec, const uint32_t offset_id) {
+  void IndexUpdater<T, TagT>::insert_mem_vec(const T* mem_vec, const uint32_t offset_id) {
 	  Timer timer;
 	 float insert_time, delta_time;
     // START: mem_vec has no ID, no presence in system
@@ -485,7 +472,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::optimized_insert_mem_vec(const T* mem_vec, 
+  void IndexUpdater<T, TagT>::optimized_insert_mem_vec(const T* mem_vec, 
                                                       const uint32_t offset_id, 
                                                       const _u32 t_id,
                                                       const std::vector<_u32> &enters) {
@@ -521,7 +508,7 @@ namespace diskann {
     this->delta_times[thread_no] += delta_time;
   }
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::cached_offset_iterate_to_fixed_point(const T* vec, const uint32_t offset_id, const uint32_t Lsize,
+  void IndexUpdater<T, TagT>::cached_offset_iterate_to_fixed_point(const T* vec, const uint32_t offset_id, const uint32_t Lsize,
                                           std::vector<Neighbor> &expanded_nodes_info, 
                                           tsl::robin_map<uint32_t, T*> &coord_map, const _u32 t_id, const std::vector<_u32> &enters) {
     std::vector<Neighbor> exp_node_info;
@@ -554,7 +541,7 @@ namespace diskann {
     }
   }
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::offset_iterate_to_fixed_point(const T* vec, const uint32_t offset_id, const uint32_t Lsize,
+  void IndexUpdater<T, TagT>::offset_iterate_to_fixed_point(const T* vec, const uint32_t offset_id, const uint32_t Lsize,
                                           std::vector<Neighbor> &expanded_nodes_info, 
                                           tsl::robin_map<uint32_t, T*> &coord_map) {
     std::vector<Neighbor> exp_node_info;
@@ -619,7 +606,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::prune_neighbors(const T* vec, const tsl::robin_map<uint32_t, T*> &coord_map, 
+  void IndexUpdater<T, TagT>::prune_neighbors(const T* vec, const tsl::robin_map<uint32_t, T*> &coord_map, 
                                     std::vector<Neighbor> &pool, std::vector<uint32_t> &pruned_list) {
     if (pool.size() == 0)
       return;
@@ -648,7 +635,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::prune_neighbors_pq(const uint32_t id, std::vector<Neighbor> &pool, 
+  void IndexUpdater<T, TagT>::prune_neighbors_pq(const uint32_t id, std::vector<Neighbor> &pool, 
                                                 std::vector<uint32_t> &pruned_list, uint8_t* scratch) {
     if (pool.size() == 0)
       return;
@@ -677,7 +664,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::occlude_list(std::vector<Neighbor> &pool, const T *vec, 
+  void IndexUpdater<T, TagT>::occlude_list(std::vector<Neighbor> &pool, const T *vec, 
                                     const tsl::robin_map<uint32_t, T*> &coord_map, 
                                     std::vector<Neighbor> &result, std::vector<float> &occlude_factor) {
     if (pool.empty())
@@ -715,7 +702,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::occlude_list_pq(std::vector<Neighbor> &pool, const uint32_t id, 
+  void IndexUpdater<T, TagT>::occlude_list_pq(std::vector<Neighbor> &pool, const uint32_t id, 
                                            std::vector<Neighbor> &result, std::vector<float> &occlude_factor, uint8_t* scratch) {
     if (pool.empty())
       return;
@@ -748,7 +735,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::occlude_list_pq_simd(std::vector<Neighbor> &pool, 
+  void IndexUpdater<T, TagT>::occlude_list_pq_simd(std::vector<Neighbor> &pool, 
                                               const uint32_t id, 
                                               std::vector<Neighbor> &result, 
                                               std::vector<float> &occlude_factor, 
@@ -817,7 +804,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::dump_to_disk(const std::vector<DiskNode<T>> &disk_nodes, const uint32_t start_id, 
+  void IndexUpdater<T, TagT>::dump_to_disk(const std::vector<DiskNode<T>> &disk_nodes, const uint32_t start_id, 
                                  const char* buf, const uint32_t n_sectors) {
       assert(start_id % this->nnodes_per_sector == 0);
       uint32_t start_sector = (start_id / this->nnodes_per_sector) + 1;
@@ -834,7 +821,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::compute_deleted_ids() {
+  void IndexUpdater<T, TagT>::compute_deleted_ids() {
     // process disk deleted tags
     for(uint32_t i=0; i < this->disk_npts; i++) {
       TagT i_tag = this->disk_tags[i];
@@ -858,7 +845,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::process_deletes() {
+  void IndexUpdater<T, TagT>::process_deletes() {
     // buf to hold data being read
     char* buf = nullptr;
     alloc_aligned((void**)&buf, SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);
@@ -945,7 +932,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::optimized_process_deletes() {
+  void IndexUpdater<T, TagT>::optimized_process_deletes() {
     // buf to hold data being read
     char* buf = nullptr;
     alloc_aligned((void**)&buf, SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);
@@ -1032,59 +1019,9 @@ namespace diskann {
     // free backing buf for deletes
     aligned_free((void*)this->delete_backing_buf);
   }
-
-  template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::optimized_populate_deleted_nhoods() {
-    // buf for scratch
-    char* buf = nullptr;
-    alloc_aligned((void**)&buf, SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);
-
-    // scan deleted nodes and get 
-    std::vector<DiskNode<T>> deleted_nodes;
-    uint64_t backing_buf_size = (uint64_t) this->disk_deleted_ids.size() * ROUND_UP(this->max_node_len, 32);
-    backing_buf_size = ROUND_UP(backing_buf_size, 256);
-    // std::cout << "ALLOC: " << (backing_buf_size << 10) << "KiB aligned buffer for deletes.\n";
-    alloc_aligned((void**) &this->delete_backing_buf, backing_buf_size, 256);
-    memset(this->delete_backing_buf, 0, backing_buf_size);
-    this->disk_index->scan_deleted_nodes(this->disk_deleted_ids, deleted_nodes, buf, this->delete_backing_buf, SECTORS_PER_MERGE);
-
-    // insert into deleted_nhoods
-    this->disk_deleted_nhoods.clear();
-		this->disk_deleted_nhoods.reserve(deleted_nodes.size());
-    // size_t max_degree = 0;
-    for(auto &nhood : deleted_nodes) {
-      // WARNING :: ASSUMING DISK GRAPH DEGREE NEVER GOES OVER 512
-      assert(nhood.nnbrs < 512);
-      std::vector<uint32_t> non_deleted_nbrs;
-      for(uint32_t i=0;i<nhood.nnbrs;i++){
-        uint32_t id = nhood.nbrs[i];
-        auto iter = this->disk_deleted_ids.find(id);
-        if (iter == this->disk_deleted_ids.end()) {
-          non_deleted_nbrs.push_back(id);
-        }
-      }
-      // this->disk_deleted_nhoods.insert(std::make_pair(nhood.id, std::vector<uint32_t>(nhood.nbrs, nhood.nbrs + nhood.nnbrs)));
-      this->disk_deleted_nhoods.insert(std::make_pair(nhood.id, non_deleted_nbrs));
-      // max_degree = std::max(max_degree, non_deleted_nbrs.size());
-    }
-    // std::cout << "Starting building delete_neighbor_set_ ..." << std::endl;
-    // diskann::Timer timer;
-    // // this->delete_neighbor_set_ = 
-    // //   new DeleteNeighbors<T>(this->pq_data, 
-    // //                          this->disk_index->GetPQTable(),
-    // //                          this->disk_deleted_nhoods.size(),
-    // //                          max_degree);
-    // this->delete_neighbor_set_->build(this->disk_deleted_nhoods);
-    // std::cout << "delete_neighbor_set_ build time: " << 
-    //           (float) timer.elapsed() / 1000 / 1000 << "s" << std::endl;
-    // free buf
-    aligned_free((void*) buf);
-    assert(deleted_nodes.size() == this->disk_deleted_ids.size());
-    assert(this->disk_deleted_nhoods.size() == this->disk_deleted_ids.size());
-  }
   
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::populate_deleted_nhoods() {
+  void IndexUpdater<T, TagT>::populate_deleted_nhoods() {
     // buf for scratch
     char* buf = nullptr;
     alloc_aligned((void**)&buf, SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);
@@ -1100,7 +1037,7 @@ namespace diskann {
 
     // insert into deleted_nhoods
     this->disk_deleted_nhoods.clear();
-		this->disk_deleted_nhoods.reserve(deleted_nodes.size());
+	this->disk_deleted_nhoods.reserve(deleted_nodes.size());
     for(auto &nhood : deleted_nodes) {
       // WARNING :: ASSUMING DISK GRAPH DEGREE NEVER GOES OVER 512
       assert(nhood.nnbrs < 512);
@@ -1123,7 +1060,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::consolidate_deletes(DiskNode<T> &disk_node, uint8_t* scratch) {
+  void IndexUpdater<T, TagT>::consolidate_deletes(DiskNode<T> &disk_node, uint8_t* scratch) {
     // if node is deleted
     if (this->is_deleted(disk_node)) {
       disk_node.nnbrs = 0;
@@ -1206,7 +1143,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::optimized_consolidate_deletes(DiskNode<T> &disk_node, 
+  void IndexUpdater<T, TagT>::optimized_consolidate_deletes(DiskNode<T> &disk_node, 
                                                            uint8_t* scratch,
                                                            uint16_t* scratch_u16) {
     // if node is deleted
@@ -1301,7 +1238,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  bool IndexMerger<T, TagT>::is_deleted(const DiskNode<T> &disk_node) {
+  bool IndexUpdater<T, TagT>::is_deleted(const DiskNode<T> &disk_node) {
     // short circuit when disk_node is a `hole` on disk
     if((this->disk_tags[disk_node.id] == std::numeric_limits<uint32_t>::max()) && (disk_node.nnbrs != 0))
 	    std::cout << "Node with id " << disk_node.id << " is a hole but has non-zero degree " << disk_node.nnbrs << std::endl;
@@ -1309,7 +1246,7 @@ namespace diskann {
   }
   
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::compute_rename_map() {
+  void IndexUpdater<T, TagT>::compute_rename_map() {
     uint32_t needed = 0;
     for(auto &mem_npt : this->mem_npts) {
       needed += mem_npt;
@@ -1372,7 +1309,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  uint32_t IndexMerger<T, TagT>::rename(uint32_t id) const {
+  uint32_t IndexUpdater<T, TagT>::rename(uint32_t id) const {
     auto iter = std::lower_bound(this->rename_list.begin(), this->rename_list.end(), 
                                  std::make_pair(id, std::numeric_limits<uint32_t>::max()), 
                                  [] (const auto &left, const auto &right) {return left.first < right.first;});
@@ -1389,7 +1326,7 @@ namespace diskann {
   }
   
   template<typename T, typename TagT>
-  uint32_t IndexMerger<T, TagT>::rename_inverse(uint32_t renamed_id) const {
+  uint32_t IndexUpdater<T, TagT>::rename_inverse(uint32_t renamed_id) const {
     auto iter = std::lower_bound(this->inverse_list.begin(), this->inverse_list.end(), 
                                  std::make_pair(renamed_id, std::numeric_limits<uint32_t>::max()), 
                                  [] (const auto &left, const auto &right) {return left.first < right.first;});
@@ -1406,7 +1343,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::rename(DiskNode<T> &node) const {
+  void IndexUpdater<T, TagT>::rename(DiskNode<T> &node) const {
     uint32_t renamed_id = this->rename(node.id);
     if (renamed_id != std::numeric_limits<uint32_t>::max()) {
       node.id = renamed_id;
@@ -1421,7 +1358,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::rename(std::vector<uint32_t> &ids) const {
+  void IndexUpdater<T, TagT>::rename(std::vector<uint32_t> &ids) const {
     for(uint32_t i=0;i<ids.size();i++) {
       uint32_t renamed_id = this->rename(ids[i]);
       if (renamed_id != std::numeric_limits<uint32_t>::max()) {
@@ -1431,7 +1368,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  const uint32_t IndexMerger<T, TagT>::get_index_id(const uint32_t offset_id) const {
+  const uint32_t IndexUpdater<T, TagT>::get_index_id(const uint32_t offset_id) const {
     if (offset_id < this->offset_ids[0]) {
       return std::numeric_limits<uint32_t>::max();
     }
@@ -1446,7 +1383,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  std::vector<uint32_t> IndexMerger<T, TagT>::get_edge_list(const uint32_t offset_id) {
+  std::vector<uint32_t> IndexUpdater<T, TagT>::get_edge_list(const uint32_t offset_id) {
     const uint32_t index_no = this->get_index_id(offset_id);
     if (index_no == std::numeric_limits<uint32_t>::max()) {
       assert(offset_id < this->offset_ids[0]);
@@ -1460,7 +1397,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  const T* IndexMerger<T, TagT>::get_mem_data(const uint32_t offset_id) {
+  const T* IndexUpdater<T, TagT>::get_mem_data(const uint32_t offset_id) {
     const uint32_t index_no = this->get_index_id(offset_id);
     if (index_no == std::numeric_limits<uint32_t>::max()) {
       assert(offset_id < this->offset_ids[0]);
@@ -1472,7 +1409,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::write_tag_file(const std::string &tag_out_filename, const uint32_t npts) {
+  void IndexUpdater<T, TagT>::write_tag_file(const std::string &tag_out_filename, const uint32_t npts) {
       diskann::Timer timer;
     std::cout << "Writing new tags to " << tag_out_filename << "\n";
    // std::ofstream tag_writer(tag_out_filename, std::ios::trunc);
@@ -1516,7 +1453,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::process_merges() {
+  void IndexUpdater<T, TagT>::process_merges() {
     // buf to hold data being read
     char* buf = nullptr;
     alloc_aligned((void**)&buf, SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);
@@ -1675,7 +1612,7 @@ namespace diskann {
   }
 
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::merge() {
+  void IndexUpdater<T, TagT>::merge() {
     // populate deleted IDs
     std::cout << "computing deleted ids" << std::endl;
     this->compute_deleted_ids();
@@ -1772,7 +1709,7 @@ namespace diskann {
 
     // batch rename all inserted edges in each delta
     std::cout << "Renaming edges for easier access during merge.\n";
-    // const std::function<uint32_t(uint32_t)> rename_func = std::bind(&IndexMerger<T, TagT>::rename, this);
+    // const std::function<uint32_t(uint32_t)> rename_func = std::bind(&IndexUpdater<T, TagT>::rename, this);
     const std::function<uint32_t(uint32_t)> rename_func = [this] (uint32_t id) {return this->rename(id);};
     this->disk_delta->rename_edges(rename_func);
     for(auto &delta : this->mem_deltas) {
@@ -1829,7 +1766,7 @@ namespace diskann {
     copy_file(prefix_pq_in + "_pivots.bin_rearrangement_perm.bin", prefix_pq_out + "_pivots.bin_rearrangement_perm.bin");
   }
   template<typename T, typename TagT>
-  void IndexMerger<T, TagT>::optimized_merge() {
+  void IndexUpdater<T, TagT>::optimized_merge() {
     // populate deleted IDs
     this->compute_deleted_ids();
     this->populate_deleted_nhoods();
@@ -1918,7 +1855,7 @@ namespace diskann {
 
     // batch rename all inserted edges in each delta
     std::cout << "Renaming edges for easier access during merge.\n";
-    // const std::function<uint32_t(uint32_t)> rename_func = std::bind(&IndexMerger<T, TagT>::rename, this);
+    // const std::function<uint32_t(uint32_t)> rename_func = std::bind(&IndexUpdater<T, TagT>::rename, this);
     const std::function<uint32_t(uint32_t)> rename_func = [this] (uint32_t id) {return this->rename(id);};
     this->disk_delta->rename_edges(rename_func);
     for(auto &delta : this->mem_deltas) {
@@ -1975,13 +1912,13 @@ namespace diskann {
     copy_file(prefix_pq_in + "_pivots.bin_rearrangement_perm.bin", prefix_pq_out + "_pivots.bin_rearrangement_perm.bin");
   }
   // template class instantiations
-  template class IndexMerger<float, uint32_t>;
-  template class IndexMerger<uint8_t, uint32_t>;
-  template class IndexMerger<int8_t, uint32_t>;
-  template class IndexMerger<float, int64_t>;
-  template class IndexMerger<uint8_t, int64_t>;
-  template class IndexMerger<int8_t, int64_t>;
-  template class IndexMerger<float, uint64_t>;
-  template class IndexMerger<uint8_t, uint64_t>;
-  template class IndexMerger<int8_t, uint64_t>;
+  template class IndexUpdater<float, uint32_t>;
+  template class IndexUpdater<uint8_t, uint32_t>;
+  template class IndexUpdater<int8_t, uint32_t>;
+  template class IndexUpdater<float, int64_t>;
+  template class IndexUpdater<uint8_t, int64_t>;
+  template class IndexUpdater<int8_t, int64_t>;
+  template class IndexUpdater<float, uint64_t>;
+  template class IndexUpdater<uint8_t, uint64_t>;
+  template class IndexUpdater<int8_t, uint64_t>;
 } // namespace diskann

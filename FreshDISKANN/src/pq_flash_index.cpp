@@ -171,8 +171,10 @@ namespace diskann {
                                32768 * 32 * sizeof(_u8), 256);
         diskann::alloc_aligned((void **) &scratch.aligned_pqtable_dist_scratch,
                                25600 * sizeof(float), 256);
+        // diskann::alloc_aligned((void **) &scratch.aligned_quanted_dist_scratch,
+        //                        25600 * sizeof(uint8_t), 256);
         diskann::alloc_aligned((void **) &scratch.aligned_dist_scratch,
-                               512 * sizeof(float), 256);
+                                64 * 128 * sizeof(float), 256);
         diskann::alloc_aligned((void **) &scratch.aligned_query_T,
                                this->aligned_dim * sizeof(T), 8 * sizeof(T));
         diskann::alloc_aligned((void **) &scratch.aligned_query_float,
@@ -206,6 +208,7 @@ namespace diskann {
       diskann::aligned_free((void *) scratch.aligned_scratch);
       diskann::aligned_free((void *) scratch.aligned_pq_coord_scratch);
       diskann::aligned_free((void *) scratch.aligned_pqtable_dist_scratch);
+      // diskann::aligned_free((void *) scratch.aligned_quanted_dist_scratch);
       diskann::aligned_free((void *) scratch.aligned_dist_scratch);
       diskann::aligned_free((void *) scratch.aligned_query_float);
       diskann::aligned_free((void *) scratch.aligned_query_T);
@@ -529,7 +532,27 @@ namespace diskann {
     this->n_chunks = nchunks_u64;
 
     pq_table.load_pq_centroid_bin(pq_table_bin.c_str(), nchunks_u64);
-
+    std::cout << "load_pq_centroid_bin" << std::endl;
+    // {
+    //     size_t npts, dim;
+    //     T *data;
+    //     diskann::load_bin<T>(origin_file, data, npts, dim);
+    //     std::cout << "Load origin finished." << " npts = " << npts << " dim = " << dim << std::endl;
+    //     std::vector<int> ids;
+    //     ids.resize(npts);
+    //     std::iota(ids.begin(), ids.end(), 0);
+    //     std::mt19937 rnd(19260817);
+    //     std::shuffle(ids.begin(), ids.end(), rnd);
+    //     size_t n = std::min(size_t(1000), npts);
+    //     std::vector<T> sample(dim * n);
+    //     for (size_t i = 0; i < n; i++) {
+    //         std::memcpy(sample.data() + i * dim, data + ids[i] * dim, dim * sizeof(T));
+    //     }
+    //     std::cout << "Sampling finished." << std::endl;
+    //     pq_table.train(n, sample.data());
+    //     std::cout << "Training finished." << std::endl;
+    //     diskann::transpose_pq_codes(pq_data, npts_u64, nchunks_u64, gsize);
+    // }
     /*
         _u64 npts_lrn, ndims_lrn, ndims_lrn_alg;
 
@@ -690,14 +713,14 @@ namespace diskann {
       medoids[0] = (_u32)(medoid_id_on_file);
       use_medoids_data_as_centroids();
     }
-
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // num_medoids = 1;
     // load tags
     if (load_tags) {
       std::string tag_file = disk_index_file;
       tag_file = tag_file + ".tags";
       this->load_tags(tag_file);
     }
-    //    std::cout << "done.." << std::endl;
     return 0;
   }
 
@@ -855,7 +878,7 @@ namespace diskann {
     std::vector<AlignedRead> frontier_read_reqs;
     std::vector<std::pair<unsigned, std::pair<unsigned, unsigned *>>>
         cached_nhoods;
-
+    bool first_round = false;
     while (k < cur_list_size) {
       auto nk = cur_list_size;
       // clear iteration state
@@ -876,6 +899,8 @@ namespace diskann {
           if (iter != nhood_cache.end()) {
             cached_nhoods.push_back(
                 std::make_pair(retset[marker].id, iter->second));
+            // #pragma omp atomic 
+            //   cache_hit++;
             if (stats != nullptr) {
               stats->n_cache_hits++;
             }
@@ -922,9 +947,15 @@ namespace diskann {
           stats->io_us += io_timer.elapsed();
         }
       }
-
+      auto t_id = omp_get_thread_num();
       // process cached nhoods
       for (auto &cached_nhood : cached_nhoods) {
+        if (traveled[t_id].size() == 0 || first_round){
+          traveled[t_id].emplace_back(cached_nhood.first);
+          first_round = true;
+        }
+      // #pragma omp atomic
+      //   total_travel++;
         auto global_cache_iter = coord_cache.find(cached_nhood.first);
         T *  node_fp_coords = global_cache_iter->second;
         T *  node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
@@ -1002,6 +1033,8 @@ namespace diskann {
 #else
       for (auto &frontier_nhood : frontier_nhoods) {
 #endif
+        // #pragma omp atomic
+        //   total_travel++;
         char *node_disk_buf =
             OFFSET_TO_NODE(frontier_nhood.second, frontier_nhood.first);
         unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
@@ -1100,8 +1133,1143 @@ namespace diskann {
       stats->total_us = (double) query_timer.elapsed();
     }
   }
-  //  }
+  // template<typename T, typename TagT>
+  // void PQFlashIndex<T, TagT>::filter_disk_iterate_to_fixed_point(
+  //     const T *query1, const uint32_t l_search, const uint32_t beam_width,
+  //     std::vector<Neighbor> &expanded_nodes_info,
+  //     tsl::robin_map<uint32_t, T *> *coord_map, Distance<T> *output_dist_func,
+  //     QueryStats *stats, ThreadData<T> *passthrough_data,
+  //     tsl::robin_set<uint32_t> *exclude_nodes) {
+  //   // only pull from sector scratch if ThreadData<T> not passed as arg
+  //   ThreadData<T> data;
+  //   if (passthrough_data == nullptr) {
+  //     data = this->thread_data.pop();
+  //     while (data.scratch.sector_scratch == nullptr) {
+  //       this->thread_data.wait_for_push_notify();
+  //       data = this->thread_data.pop();
+  //     }
+  //   } else {
+  //     data = *passthrough_data;
+  //   }
 
+  //   for (uint32_t i = 0; i < this->data_dim; i++) {
+  //     data.scratch.aligned_query_float[i] = query1[i];
+  //   }
+  //   memcpy(data.scratch.aligned_query_T, query1, this->data_dim * sizeof(T));
+  //   const T *    query = data.scratch.aligned_query_T;
+  //   const float *query_float = data.scratch.aligned_query_float;
+
+  //   IOContext ctx = data.ctx;
+  //   auto      query_scratch = &(data.scratch);
+
+  //   // reset query
+  //   query_scratch->reset();
+
+  //   // scratch space to compute distances between FP32 Query and INT8 data
+  //   float *scratch = query_scratch->aligned_scratch;
+  //   _mm_prefetch((char *) scratch, _MM_HINT_T0);
+
+  //   // pointers to buffers for data
+  //   T *   data_buf = query_scratch->coord_scratch;
+  //   _u64 &data_buf_idx = query_scratch->coord_idx;
+  //   _mm_prefetch((char *) data_buf, _MM_HINT_T1);
+
+  //   // sector scratch
+  //   char *sector_scratch = query_scratch->sector_scratch;
+  //   _u64 &sector_scratch_idx = query_scratch->sector_idx;
+
+  //   // query <-> PQ chunk centers distances
+  //   float *pq_dists = query_scratch->aligned_pqtable_dist_scratch;
+  //   pq_table.populate_chunk_distances(query, pq_dists);
+
+  //   // query <-> neighbor list
+  //   float *dist_scratch = query_scratch->aligned_dist_scratch;
+  //   _u8 *  pq_coord_scratch = query_scratch->aligned_pq_coord_scratch;
+
+  //   // lambda to batch compute query<-> node distances in PQ space
+  //   auto compute_dists = [this, pq_coord_scratch, pq_dists](
+  //       const unsigned *ids, const _u64 n_ids, float *dists_out) {
+  //     ::aggregate_coords(ids, n_ids, this->data, this->n_chunks,
+  //                        pq_coord_scratch);
+  //     ::pq_dist_lookup(pq_coord_scratch, n_ids, this->n_chunks, pq_dists,
+  //                      dists_out);
+  //   };
+
+  //   Timer                 query_timer, io_timer, cpu_timer;
+  //   std::vector<Neighbor> retset;
+  //   retset.resize(l_search + 1);
+  //   tsl::robin_set<_u64> visited(4096);
+
+  //   // re-naming `expanded_nodes_info` to not change rest of the code
+  //   std::vector<Neighbor> &full_retset = expanded_nodes_info;
+  //   full_retset.reserve(4096);
+  //   _u32                        best_medoid = 0;
+  //   float                       best_dist = (std::numeric_limits<float>::max)();
+  //   std::vector<SimpleNeighbor> medoid_dists;
+  //   for (_u64 cur_m = 0; cur_m < num_medoids; cur_m++) {
+  //     float cur_expanded_dist = dist_cmp_float->compare(
+  //         query_float, centroid_data + aligned_dim * cur_m,
+  //         (unsigned) aligned_dim);
+  //     if (cur_expanded_dist < best_dist) {
+  //       best_medoid = medoids[cur_m];
+  //       best_dist = cur_expanded_dist;
+  //     }
+  //   }
+
+  //   compute_dists(&best_medoid, 1, dist_scratch);
+  //   retset[0].id = best_medoid;
+  //   retset[0].distance = dist_scratch[0];
+  //   retset[0].flag = true;
+  //   visited.insert(best_medoid);
+
+  //   unsigned cur_list_size = 1;
+
+  //   std::sort(retset.begin(), retset.begin() + cur_list_size);
+
+  //   unsigned cmps = 0;
+  //   unsigned hops = 0;
+  //   unsigned num_ios = 0;
+  //   unsigned k = 0;
+  //   unsigned two_hops = 0;
+  //   int n_ops = 0;
+  //   // cleared every iteration
+  //   std::vector<unsigned> frontier;
+  //   std::vector<std::pair<unsigned, char *>> frontier_nhoods;
+  //   std::vector<AlignedRead> frontier_read_reqs;
+  //   std::vector<std::pair<unsigned, std::pair<unsigned, unsigned *>>>
+  //       cached_nhoods;
+  //   std::vector<_u32> n_ids;
+  //   while (k < cur_list_size) {
+  //     auto nk = cur_list_size;
+  //     // clear iteration state
+  //     frontier.clear();
+  //     frontier_nhoods.clear();
+  //     frontier_read_reqs.clear();
+  //     cached_nhoods.clear();
+  //     n_ids.clear();
+  //     sector_scratch_idx = 0;
+  //     // find new beam
+  //     // WAS: _u64 marker = k - 1;
+  //     _u32 marker = k;
+  //     _u32 num_seen = 0;
+  //     while (marker < cur_list_size && frontier.size() < beam_width &&
+  //            num_seen < beam_width) {
+  //       if (retset[marker].flag) {
+  //         num_seen++;
+  //         auto iter = nhood_cache.find(retset[marker].id);
+  //         if (iter != nhood_cache.end()) {
+  //           cached_nhoods.push_back(
+  //               std::make_pair(retset[marker].id, iter->second));
+  //           // #pragma omp atomic 
+  //           //   cache_hit++;
+  //           if (stats != nullptr) {
+  //             stats->n_cache_hits++;
+  //           }
+  //         } else {
+  //           frontier.push_back(retset[marker].id);
+  //         }
+  //         retset[marker].flag = false;
+  //         if (this->count_visited_nodes) {
+  //           reinterpret_cast<std::atomic<_u32> &>(
+  //               this->node_visit_counter[retset[marker].id].second)
+  //               .fetch_add(1);
+  //         }
+  //       }
+  //       marker++;
+  //     }
+  //     // read nhoods of frontier ids
+  //     if (!frontier.empty()) {
+  //       if (stats != nullptr)
+  //         stats->n_hops++;
+  //       for (_u64 i = 0; i < frontier.size(); i++) {
+  //         auto id = frontier[i];
+  //         std::pair<_u32, char *> fnhood;
+  //         fnhood.first = id;
+  //         fnhood.second = sector_scratch + sector_scratch_idx * SECTOR_LEN;
+  //         sector_scratch_idx++;
+  //         frontier_nhoods.push_back(fnhood);
+  //         frontier_read_reqs.emplace_back(
+  //             NODE_SECTOR_NO(((size_t) id)) * SECTOR_LEN, SECTOR_LEN,
+  //             fnhood.second);
+  //         if (stats != nullptr) {
+  //           stats->n_4k++;
+  //           stats->n_ios++;
+  //         }
+  //         num_ios++;
+  //       }
+  //       io_timer.reset();
+  //       n_ops = reader->submit_reqs(frontier_read_reqs, ctx);  
+  //       // synchronous IO linux
+  //       // need implementation  of async to overlap the cost of locks
+  //       if (stats != nullptr) {
+  //         stats->io_us += io_timer.elapsed();
+  //       }
+  //     }
+  //     {
+  //     std::shared_lock<std::shared_mutex> guard(delete_cache_lock_);
+  //     // process cached nhoods
+  //     for (auto &cached_nhood : cached_nhoods) {
+  //       auto global_cache_iter = coord_cache.find(cached_nhood.first);
+  //       T *  node_fp_coords = global_cache_iter->second;
+  //       T *  node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
+  //       data_buf_idx++;
+  //       memcpy(node_fp_coords_copy, node_fp_coords, data_dim * sizeof(T));
+  //       float cur_expanded_dist = dist_cmp->compare(query, node_fp_coords_copy,
+  //                                                   (unsigned) aligned_dim);
+  //       bool exclude_cur_node = false;
+  //       if (exclude_nodes != nullptr) {
+  //         exclude_cur_node =
+  //             (exclude_nodes->find(cached_nhood.first) != exclude_nodes->end());
+  //       }
+  //       // only figure in final list if
+  //       if (!exclude_cur_node) {
+  //         // added for IndexMerger calls
+  //         if (coord_map != nullptr) {
+  //           coord_map->insert(
+  //               std::make_pair(cached_nhood.first, node_fp_coords_copy));
+  //         }
+  //         full_retset.push_back(
+  //             Neighbor((unsigned) cached_nhood.first, cur_expanded_dist, true));
+  //       }
+  //       _u64      nnbrs = cached_nhood.second.first;
+  //       unsigned *node_nbrs = cached_nhood.second.second;
+
+  //       // compute node_nbrs <-> query dists in PQ space
+  //       for (_u64 m = 0; m < nnbrs; ++m) {
+  //         unsigned id = node_nbrs[m];
+  //         if (visited.find(id) != visited.end()) {
+  //           continue;
+  //         } else {
+  //           if (!del_filter_.get(id)) {
+  //             n_ids.push_back(id);
+  //             visited.insert(id);
+  //           } else if (two_hops <= two_hops_lim) {
+  //             auto iter = delete_cache_.find(id);
+  //             auto sz = iter->second.first;
+  //             auto ne = iter->second.second;
+  //             for (_u32 i = 0; i < sz && two_hops <= two_hops_lim; i++) {
+  //               if (visited.find(ne[i]) == visited.end() &&
+  //                   !del_filter_.get(ne[i])) {
+  //                 n_ids.push_back(ne[i]);
+  //                 two_hops++;
+  //                 visited.insert(ne[i]);
+  //               }
+  //             }
+  //           }
+  //         }
+  //       }
+  //       cpu_timer.reset();
+  //       compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
+  //       if (stats != nullptr) {
+  //         stats->n_cmps += nnbrs;
+  //         stats->cpu_us += cpu_timer.elapsed();
+  //       }
+
+  //       // process prefetched nhood
+  //       for (_u64 m = 0; m < (_u64)n_ids.size(); ++m) {
+  //         unsigned id = n_ids[m];
+  //         cmps++;
+  //         float dist = dist_scratch[m];
+  //         // std::cerr << "dist: " << dist << std::endl;
+  //         if (stats != nullptr) {
+  //           stats->n_cmps++;
+  //         }
+  //         if (dist >= retset[cur_list_size - 1].distance &&
+  //             (cur_list_size == l_search))
+  //           continue;
+  //         Neighbor nn(id, dist, true);
+  //         auto     r = InsertIntoPool(
+  //             retset.data(), cur_list_size,
+  //             nn);  // Return position in sorted list where nn inserted.
+  //         if (cur_list_size < l_search)
+  //           ++cur_list_size;
+  //         if (r < nk)
+  //           nk = r;  // nk logs the best position in the retset that was
+  //                    // updated
+  //                    // due to neighbors of n.
+  //       }
+  //       n_ids.clear();
+  //     }
+  //     if (!frontier.empty()) {
+  //       reader->get_events(ctx, n_ops);
+  //     }
+  //     for (auto &frontier_nhood : frontier_nhoods) {
+  //       char *node_disk_buf =
+  //           OFFSET_TO_NODE(frontier_nhood.second, frontier_nhood.first);
+  //       unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+  //       _u64      nnbrs = (_u64)(*node_buf);
+  //       T *       node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
+  //       assert(data_buf_idx < MAX_N_CMPS);
+
+  //       T *node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
+  //       data_buf_idx++;
+  //       memcpy(node_fp_coords_copy, node_fp_coords, data_dim * sizeof(T));
+  //       float cur_expanded_dist =
+  //           dist_cmp->compare(query, node_fp_coords_copy, (unsigned) data_dim);
+  //       bool exclude_cur_node = false;
+  //       if (exclude_nodes != nullptr) {
+  //         exclude_cur_node = (exclude_nodes->find(frontier_nhood.first) !=
+  //                             exclude_nodes->end());
+  //       }
+  //       // if node is to be excluded from final search results
+  //       if (!exclude_cur_node) {
+  //         // added for IndexMerger calls
+  //         if (coord_map != nullptr) {
+  //           coord_map->insert(
+  //               std::make_pair(frontier_nhood.first, node_fp_coords_copy));
+  //         }
+  //         full_retset.push_back(
+  //             Neighbor(frontier_nhood.first, cur_expanded_dist, true));
+  //       }
+  //       unsigned *node_nbrs = (node_buf + 1);
+  //       // compute node_nbrs <-> query dists in PQ space
+  //       for (_u64 m = 0; m < nnbrs; ++m) {
+  //         unsigned id = node_nbrs[m];
+  //         if (visited.find(id) != visited.end()) {
+  //           continue;
+  //         } else {
+  //           if (!del_filter_.get(id)) {
+  //             n_ids.push_back(id);
+  //             visited.insert(id);
+  //           } else if (two_hops <= two_hops_lim) {
+  //             auto iter = delete_cache_.find(id);
+  //             auto sz = iter->second.first;
+  //             auto ne = iter->second.second;
+  //             for (_u32 i = 0; i < sz && two_hops <= two_hops_lim; i++) {
+  //               if (visited.find(ne[i]) == visited.end() &&
+  //                   !del_filter_.get(ne[i])) {
+  //                 n_ids.push_back(ne[i]);
+  //                 two_hops++;
+  //                 visited.insert(ne[i]);
+  //               }
+  //             }
+  //           }
+  //         }
+  //       }
+  //       cpu_timer.reset();
+  //       compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
+  //       if (stats != nullptr) {
+  //         stats->n_cmps += nnbrs;
+  //         stats->cpu_us += cpu_timer.elapsed();
+  //       }
+
+  //       // process prefetched nhood
+  //       for (_u64 m = 0; m < (_u64)n_ids.size(); ++m) {
+  //         unsigned id = n_ids[m];
+  //         cmps++;
+  //         float dist = dist_scratch[m];
+  //         // std::cerr << "dist: " << dist << std::endl;
+  //         if (stats != nullptr) {
+  //           stats->n_cmps++;
+  //         }
+  //         if (dist >= retset[cur_list_size - 1].distance &&
+  //             (cur_list_size == l_search))
+  //           continue;
+  //         Neighbor nn(id, dist, true);
+  //         auto     r = InsertIntoPool(
+  //             retset.data(), cur_list_size,
+  //             nn);  // Return position in sorted list where nn inserted.
+  //         if (cur_list_size < l_search)
+  //           ++cur_list_size;
+  //         if (r < nk)
+  //           nk = r;  // nk logs the best position in the retset that was
+  //                    // updated
+  //                    // due to neighbors of n.
+  //       }
+  //       n_ids.clear();
+  //     }
+  //     }
+  //     // update best inserted position
+  //     //
+
+  //     if (nk <= k)
+  //       k = nk;  // k is the best position in retset updated in this round.
+  //     else
+  //       ++k;
+
+  //     hops++;
+  //   }
+  //   // std::cout << two_hops << std::endl;
+  //   // re-sort by distance
+  //   std::sort(full_retset.begin(), full_retset.end(),
+  //             [](const Neighbor &left, const Neighbor &right) {
+  //               return left.distance < right.distance;
+  //             });
+
+  //   // return data to ConcurrentQueue only if popped from it
+  //   if (passthrough_data == nullptr) {
+  //     this->thread_data.push(data);
+  //     this->thread_data.push_notify_all();
+  //   }
+
+  //   if (stats != nullptr) {
+  //     stats->total_us = (double) query_timer.elapsed();
+  //   }
+  // }
+  //  }
+  template<typename T, typename TagT>
+  void PQFlashIndex<T, TagT>::cached_disk_iterate_to_fixed_point(
+      const T *query1, const uint32_t l_search, const uint32_t beam_width,
+      std::vector<Neighbor> &expanded_nodes_info,
+      tsl::robin_map<uint32_t, T *> *coord_map, Distance<T> *output_dist_func,
+      QueryStats *stats, ThreadData<T> *passthrough_data,
+      tsl::robin_set<uint32_t> *exclude_nodes, const _u32 t_id, const std::vector<_u32> &enters) {
+    // only pull from sector scratch if ThreadData<T> not passed as arg
+    // only pull from sector scratch if ThreadData<T> not passed as arg
+    // ThreadData<T> data;
+    // if (passthrough_data == nullptr) {
+    //   data = this->thread_data.pop();
+    //   while (data.scratch.sector_scratch == nullptr) {
+    //     this->thread_data.wait_for_push_notify();
+    //     data = this->thread_data.pop();
+    //   }
+    // } else {
+    //   data = *passthrough_data;
+    // }
+
+    // /*    std::cout << "this->data_dim = " << this->data_dim << std::endl;
+    //     for (uint32_t i = 0; i < this->data_dim; i++)
+    //       std::cout << *(query1 + i) << " ;";
+    //     std::cout << std::endl; */
+    // for (uint32_t i = 0; i < this->data_dim; i++) {
+    //   data.scratch.aligned_query_float[i] = query1[i];
+    // }
+    // memcpy(data.scratch.aligned_query_T, query1, this->data_dim * sizeof(T));
+    // const T *    query = data.scratch.aligned_query_T;
+    // const float *query_float = data.scratch.aligned_query_float;
+
+    // IOContext ctx = data.ctx;
+    // auto      query_scratch = &(data.scratch);
+
+    // // reset query
+    // query_scratch->reset();
+
+    // // scratch space to compute distances between FP32 Query and INT8 data
+    // float *scratch = query_scratch->aligned_scratch;
+    // _mm_prefetch((char *) scratch, _MM_HINT_T0);
+
+    // // pointers to buffers for data
+    // T *   data_buf = query_scratch->coord_scratch;
+    // _u64 &data_buf_idx = query_scratch->coord_idx;
+    // _mm_prefetch((char *) data_buf, _MM_HINT_T1);
+
+    // // sector scratch
+    // char *sector_scratch = query_scratch->sector_scratch;
+    // _u64 &sector_scratch_idx = query_scratch->sector_idx;
+
+    // // query <-> PQ chunk centers distances
+    // float *pq_dists = query_scratch->aligned_pqtable_dist_scratch;
+    // pq_table.populate_chunk_distances(query, pq_dists);
+
+    // // query <-> neighbor list
+    // float *dist_scratch = query_scratch->aligned_dist_scratch;
+    // _u8 *  pq_coord_scratch = query_scratch->aligned_pq_coord_scratch;
+
+    // // lambda to batch compute query<-> node distances in PQ space
+    // auto compute_dists = [this, pq_coord_scratch, pq_dists](
+    //     const unsigned *ids, const _u64 n_ids, float *dists_out) {
+    //   ::aggregate_coords(ids, n_ids, this->data, this->n_chunks,
+    //                      pq_coord_scratch);
+    //   ::pq_dist_lookup(pq_coord_scratch, n_ids, this->n_chunks, pq_dists,
+    //                    dists_out);
+    // };
+
+    // Timer                 query_timer, io_timer, cpu_timer;
+    // std::vector<Neighbor> retset;
+    // retset.resize(l_search + 1);
+    // tsl::robin_set<_u64> visited(4096);
+
+    // // re-naming `expanded_nodes_info` to not change rest of the code
+    // std::vector<Neighbor> &full_retset = expanded_nodes_info;
+    // full_retset.reserve(4096);
+    // _u32                        best_medoid = 0;
+    // float                       best_dist = (std::numeric_limits<float>::max)();
+    // std::vector<SimpleNeighbor> medoid_dists;
+    // for (_u64 cur_m = 0; cur_m < num_medoids; cur_m++) {
+    //   float cur_expanded_dist = dist_cmp_float->compare(
+    //       query_float, centroid_data + aligned_dim * cur_m,
+    //       (unsigned) aligned_dim);
+    //   if (cur_expanded_dist < best_dist) {
+    //     best_medoid = medoids[cur_m];
+    //     best_dist = cur_expanded_dist;
+    //   }
+    // }
+
+    // compute_dists(&best_medoid, 1, dist_scratch);
+    // retset[0].id = best_medoid;
+    // retset[0].distance = dist_scratch[0];
+    // retset[0].flag = true;
+    // visited.insert(best_medoid);
+
+    // unsigned cur_list_size = 1;
+
+    // std::sort(retset.begin(), retset.begin() + cur_list_size);
+
+    // unsigned cmps = 0;
+    // unsigned hops = 0;
+    // unsigned num_ios = 0;
+    // unsigned k = 0;
+
+    // // cleared every iteration
+    // std::vector<unsigned> frontier;
+    // std::vector<std::pair<unsigned, char *>> frontier_nhoods;
+    // std::vector<AlignedRead> frontier_read_reqs;
+    // std::vector<std::pair<unsigned, std::pair<unsigned, unsigned *>>>
+    //     cached_nhoods;
+    // bool first_round = false;
+    // while (k < cur_list_size) {
+    //   auto nk = cur_list_size;
+    //   // clear iteration state
+    //   frontier.clear();
+    //   frontier_nhoods.clear();
+    //   frontier_read_reqs.clear();
+    //   cached_nhoods.clear();
+    //   sector_scratch_idx = 0;
+    //   // find new beam
+    //   // WAS: _u64 marker = k - 1;
+    //   _u32 marker = k;
+    //   _u32 num_seen = 0;
+    //   // while (marker < cur_list_size && frontier.size() < beam_width &&
+    //   //        num_seen < beam_width) {
+    //   //   if (retset[marker].flag) {
+    //   //     num_seen++;
+    //   //     auto iter = nhood_cache.find(retset[marker].id);
+    //   //     if (iter != nhood_cache.end()) {
+    //   //       cached_nhoods.push_back(
+    //   //           std::make_pair(retset[marker].id, iter->second));
+    //   //       if (stats != nullptr) {
+    //   //         stats->n_cache_hits++;
+    //   //       }
+    //   //     } else {
+    //   //       frontier.push_back(retset[marker].id);
+    //   //     }
+    //   //     retset[marker].flag = false;
+    //   //     if (this->count_visited_nodes) {
+    //   //       reinterpret_cast<std::atomic<_u32> &>(
+    //   //           this->node_visit_counter[retset[marker].id].second)
+    //   //           .fetch_add(1);
+    //   //     }
+    //   //   }
+    //   //   marker++;
+    //   // }
+    //   while (marker < cur_list_size && frontier.size() < beam_width &&
+    //          num_seen < beam_width) {
+    //     if (retset[marker].flag) {
+    //       num_seen++;
+    //       std::pair<_u32, _u32 *> nei;
+    //       bool flag = insert_cache_->GetNeighbor(retset[marker].id, nei);
+    //       if (flag) {
+    //         cached_nhoods.emplace_back(retset[marker].id, nei);
+    //         cache_hit++;
+    //         if (stats != nullptr) {
+    //           stats->n_cache_hits++;
+    //         }
+    //       } else {
+    //         frontier.emplace_back(retset[marker].id);
+    //       }
+    //       retset[marker].flag = false;
+    //       if (this->count_visited_nodes) {
+    //         reinterpret_cast<std::atomic<_u32> &>(
+    //             this->node_visit_counter[retset[marker].id].second)
+    //             .fetch_add(1);
+    //       }
+    //     }
+    //     marker++;
+    //   }
+    //   // read nhoods of frontier ids
+    //   if (!frontier.empty()) {
+    //     if (stats != nullptr)
+    //       stats->n_hops++;
+    //     for (_u64 i = 0; i < frontier.size(); i++) {
+    //       auto id = frontier[i];
+    //       std::pair<_u32, char *> fnhood;
+    //       fnhood.first = id;
+    //       fnhood.second = sector_scratch + sector_scratch_idx * SECTOR_LEN;
+    //       sector_scratch_idx++;
+    //       frontier_nhoods.push_back(fnhood);
+    //       frontier_read_reqs.emplace_back(
+    //           NODE_SECTOR_NO(((size_t) id)) * SECTOR_LEN, SECTOR_LEN,
+    //           fnhood.second);
+    //       if (stats != nullptr) {
+    //         stats->n_4k++;
+    //         stats->n_ios++;
+    //       }
+    //       num_ios++;
+    //     }
+    //     io_timer.reset();
+    //     reader->read(frontier_read_reqs, ctx);  // synchronous IO linux
+    //     if (stats != nullptr) {
+    //       stats->io_us += io_timer.elapsed();
+    //     }
+    //   }
+    //   // process cached nhoods
+    //   for (auto &cached_nhood : cached_nhoods) {
+    //     total_travel++;
+    //     // auto global_cache_iter = insert_cache_.find(cached_nhood.first);
+    //     if (traveled[t_id].size() == 0 || first_round) {
+    //       traveled[t_id].emplace_back(cached_nhood.first);
+    //       first_round = true;
+    //     }
+    //     T *  node_fp_coords = nullptr;
+    //     insert_cache_->GetCoord(cached_nhood.first, node_fp_coords);
+    //     T *  node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
+    //     data_buf_idx++;
+    //     memcpy(node_fp_coords_copy, node_fp_coords, data_dim * sizeof(T));
+    //     float cur_expanded_dist = dist_cmp->compare(query, node_fp_coords_copy,
+    //                                                 (unsigned) aligned_dim);
+    //     bool exclude_cur_node = false;
+    //     if (exclude_nodes != nullptr) {
+    //       exclude_cur_node =
+    //           (exclude_nodes->find(cached_nhood.first) != exclude_nodes->end());
+    //     }
+    //     // only figure in final list if
+    //     if (!exclude_cur_node) {
+    //       // added for IndexMerger calls
+    //       if (coord_map != nullptr) {
+    //         coord_map->insert(
+    //             std::make_pair(cached_nhood.first, node_fp_coords_copy));
+    //       }
+    //       full_retset.push_back(
+    //           Neighbor((unsigned) cached_nhood.first, cur_expanded_dist, true));
+    //     }
+    //     _u64      nnbrs = cached_nhood.second.first;
+    //     unsigned *node_nbrs = cached_nhood.second.second;
+    //     insert_cache_->Insert(t_id, cached_nhood.first, std::make_pair(_u32(nnbrs), node_nbrs), node_fp_coords);
+    //     // compute node_nbrs <-> query dists in PQ space
+    //     cpu_timer.reset();
+    //     compute_dists(node_nbrs, nnbrs, dist_scratch);
+    //     if (stats != nullptr) {
+    //       stats->n_cmps += nnbrs;
+    //       stats->cpu_us += cpu_timer.elapsed();
+    //     }
+
+    //     // process prefetched nhood
+    //     for (_u64 m = 0; m < nnbrs; ++m) {
+    //       unsigned id = node_nbrs[m];
+    //       if (visited.find(id) != visited.end()) {
+    //         continue;
+    //       } else {
+    //         visited.insert(id);
+    //         cmps++;
+    //         float dist = dist_scratch[m];
+    //         // std::cout << "cmp: " << id << ", dist: " << dist <<
+    //         // std::endl; std::cerr << "dist: " << dist << std::endl;
+    //         if (dist >= retset[cur_list_size - 1].distance &&
+    //             (cur_list_size == l_search))
+    //           continue;
+    //         Neighbor nn(id, dist, true);
+    //         auto     r = InsertIntoPool(
+    //             retset.data(), cur_list_size,
+    //             nn);  // Return position in sorted list where nn inserted.
+    //         if (cur_list_size < l_search)
+    //           ++cur_list_size;
+    //         if (r < nk)
+    //           nk = r;  // nk logs the best position in the retset that was
+    //         // updated
+    //         // due to neighbors of n.
+    //       }
+    //     }
+    //   }
+    //   for (auto &frontier_nhood : frontier_nhoods) {
+    //     if (traveled[t_id].size() == 0 || first_round) {
+    //       traveled[t_id].emplace_back(frontier_nhood.first);
+    //       first_round = true;
+    //     }
+    //     total_travel++;
+    //     char *node_disk_buf =
+    //         OFFSET_TO_NODE(frontier_nhood.second, frontier_nhood.first);
+    //     unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+    //     _u64      nnbrs = (_u64)(*node_buf);
+    //     T *       node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
+    //     assert(data_buf_idx < MAX_N_CMPS);
+    //     T *node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
+    //     data_buf_idx++;
+    //     memcpy(node_fp_coords_copy, node_fp_coords, data_dim * sizeof(T));
+    //     float cur_expanded_dist =
+    //         dist_cmp->compare(query, node_fp_coords_copy, (unsigned) data_dim);
+    //     bool exclude_cur_node = false;
+    //     if (exclude_nodes != nullptr) {
+    //       exclude_cur_node = (exclude_nodes->find(frontier_nhood.first) !=
+    //                           exclude_nodes->end());
+    //     }
+    //     // if node is to be excluded from final search results
+    //     if (!exclude_cur_node) {
+    //       // added for IndexMerger calls
+    //       if (coord_map != nullptr) {
+    //         coord_map->insert(
+    //             std::make_pair(frontier_nhood.first, node_fp_coords_copy));
+    //       }
+    //       full_retset.push_back(
+    //           Neighbor(frontier_nhood.first, cur_expanded_dist, true));
+    //     }
+    //     unsigned *node_nbrs = (node_buf + 1);
+    //     // compute node_nbrs <-> query dist in PQ space
+    //     cpu_timer.reset();
+    //     compute_dists(node_nbrs, nnbrs, dist_scratch);
+    //     if (stats != nullptr) {
+    //       stats->n_cmps += nnbrs;
+    //       stats->cpu_us += cpu_timer.elapsed();
+    //     }
+    //     insert_cache_->Insert(t_id, frontier_nhood.first, std::make_pair(nnbrs, node_nbrs), node_fp_coords);
+    //     cpu_timer.reset();
+    //     // process prefetch-ed nhood
+    //     for (_u64 m = 0; m < nnbrs; ++m) {
+    //       unsigned id = node_nbrs[m];
+    //       if (visited.find(id) != visited.end()) {
+    //         continue;
+    //       } else {
+    //         visited.insert(id);
+    //         cmps++;
+    //         float dist = dist_scratch[m];
+    //         // std::cerr << "dist: " << dist << std::endl;
+    //         if (stats != nullptr) {
+    //           stats->n_cmps++;
+    //         }
+    //         if (dist >= retset[cur_list_size - 1].distance &&
+    //             (cur_list_size == l_search))
+    //           continue;
+    //         Neighbor nn(id, dist, true);
+    //         auto     r = InsertIntoPool(
+    //             retset.data(), cur_list_size,
+    //             nn);  // Return position in sorted list where nn inserted.
+    //         if (cur_list_size < l_search)
+    //           ++cur_list_size;
+    //         if (r < nk)
+    //           nk = r;  // nk logs the best position in the retset that was
+    //                    // updated
+    //                    // due to neighbors of n.
+    //       }
+    //     }
+
+    //     if (stats != nullptr) {
+    //       stats->cpu_us += cpu_timer.elapsed();
+    //     }
+    //   }
+
+    //   // update best inserted position
+    //   //
+
+    //   if (nk <= k)
+    //     k = nk;  // k is the best position in retset updated in this round.
+    //   else
+    //     ++k;
+
+    //   hops++;
+    // }
+    ThreadData<T> data;
+    if (passthrough_data == nullptr) {
+      data = this->thread_data.pop();
+      while (data.scratch.sector_scratch == nullptr) {
+        this->thread_data.wait_for_push_notify();
+        data = this->thread_data.pop();
+      }
+    } else {
+      data = *passthrough_data;
+    }
+
+    /*    std::cout << "this->data_dim = " << this->data_dim << std::endl;
+        for (uint32_t i = 0; i < this->data_dim; i++)
+          std::cout << *(query1 + i) << " ;";
+        std::cout << std::endl; */
+    for (uint32_t i = 0; i < this->data_dim; i++) {
+      data.scratch.aligned_query_float[i] = query1[i];
+    }
+    memcpy(data.scratch.aligned_query_T, query1, this->data_dim * sizeof(T));
+    const T *    query = data.scratch.aligned_query_T;
+    const float *query_float = data.scratch.aligned_query_float;
+
+    IOContext ctx = data.ctx;
+    auto      query_scratch = &(data.scratch);
+
+    // reset query
+    query_scratch->reset();
+
+    // scratch space to compute distances between FP32 Query and INT8 data
+    float *scratch = query_scratch->aligned_scratch;
+    _mm_prefetch((char *) scratch, _MM_HINT_T0);
+
+    // pointers to buffers for data
+    T *   data_buf = query_scratch->coord_scratch;
+    _u64 &data_buf_idx = query_scratch->coord_idx;
+    _mm_prefetch((char *) data_buf, _MM_HINT_T1);
+
+    // sector scratch
+    char *sector_scratch = query_scratch->sector_scratch;
+    _u64 &sector_scratch_idx = query_scratch->sector_idx;
+
+    // query <-> PQ chunk centers distances
+    float *pq_dists = query_scratch->aligned_pqtable_dist_scratch;
+    pq_table.populate_chunk_distances(query, pq_dists);
+
+    // query <-> neighbor list
+    float *dist_scratch = query_scratch->aligned_dist_scratch;
+    _u8 *  pq_coord_scratch = query_scratch->aligned_pq_coord_scratch;
+
+    // lambda to batch compute query<-> node distances in PQ space
+    auto compute_dists = [this, pq_coord_scratch, pq_dists](
+        const unsigned *ids, const _u64 n_ids, float *dists_out) {
+      ::aggregate_coords(ids, n_ids, this->data, this->n_chunks,
+                         pq_coord_scratch);
+      ::pq_dist_lookup(pq_coord_scratch, n_ids, this->n_chunks, pq_dists,
+                       dists_out);
+    };
+
+    Timer                 query_timer, io_timer, cpu_timer;
+    std::vector<Neighbor> retset;
+    retset.resize(l_search + 1);
+    tsl::robin_set<_u64> visited(4096);
+
+    // re-naming `expanded_nodes_info` to not change rest of the code
+    std::vector<Neighbor> &full_retset = expanded_nodes_info;
+    full_retset.reserve(4096);
+    _u32                        best_medoid = 0;
+    float                       best_dist = (std::numeric_limits<float>::max)();
+    std::vector<SimpleNeighbor> medoid_dists;
+    // for (_u64 cur_m = 0; cur_m < num_medoids; cur_m++) {
+    //   float cur_expanded_dist = dist_cmp_float->compare(
+    //       query_float, centroid_data + aligned_dim * cur_m,
+    //       (unsigned) aligned_dim);
+    //   if (cur_expanded_dist < best_dist) {
+    //     best_medoid = medoids[cur_m];
+    //     best_dist = cur_expanded_dist;
+    //   }
+    // }
+    // for (size_t cur_m = 0; cur_m < enters_; cur_m++) {
+    //   float cur_expanded_dist = dist_cmp_float->compare(
+    //       query_float, insert_coords_.data() + aligned_dim * cur_m,
+    //       (unsigned) aligned_dim);
+    //   if (cur_expanded_dist < best_dist) {
+    //     best_medoid = insert_enters_[cur_m];
+    //     best_dist = cur_expanded_dist;
+    //   }
+    // }
+    // compute_dists(&best_medoid, 1, dist_scratch);
+    // retset[0].id = best_medoid;
+    // retset[0].distance = dist_scratch[0];
+    // retset[0].flag = true;
+    // visited.insert(best_medoid);
+    std::vector<_u32> ids;
+    for (_u64 cur_m = 0; cur_m < num_medoids; cur_m++) {
+      ids.emplace_back(medoids[cur_m]);
+    }
+    for (auto i : enters) {
+      ids.emplace_back(i);
+    }
+    compute_dists(ids.data(), ids.size(), dist_scratch);
+
+    // std::cout << ids.size() << std::endl;
+    for (size_t cur_m = 0; cur_m < num_medoids; cur_m++) {
+      float cur_expanded_dist = dist_scratch[cur_m];
+      if (cur_expanded_dist < best_dist) {
+        best_medoid = ids[cur_m];
+        best_dist = cur_expanded_dist;
+      }
+    }
+    _u32                        best_enter = 0;
+    float                       best_enter_dist = (std::numeric_limits<float>::max)();
+
+    for (size_t cur_m = num_medoids; cur_m < ids.size(); cur_m++) {
+      float cur_expanded_dist = dist_scratch[cur_m];
+      if (cur_expanded_dist < best_enter_dist) {
+        best_enter = ids[cur_m];
+        best_enter_dist = cur_expanded_dist;
+      }
+    }
+    // std::cout << ids.size() << std::endl;
+  #pragma omp atomic
+    dist_1 += (double)std::min(best_enter_dist, best_dist);
+  #pragma omp atomic
+    dist_2 += (double)best_dist;
+    if (10 * best_dist < best_enter_dist) {
+      retset[0].id = best_medoid;
+      retset[0].distance = best_dist;
+      retset[0].flag = true;
+      visited.insert(best_medoid);
+    } else {
+      retset[0].id = best_enter;
+      retset[0].distance = best_enter_dist;
+      retset[0].flag = true;
+      visited.insert(best_enter);
+    }
+
+    unsigned cur_list_size = 1;
+
+    std::sort(retset.begin(), retset.begin() + cur_list_size);
+
+    unsigned cmps = 0;
+    unsigned hops = 0;
+    unsigned num_ios = 0;
+    unsigned k = 0;
+
+    // cleared every iteration
+    std::vector<unsigned> frontier;
+    std::vector<std::pair<unsigned, char *>> frontier_nhoods;
+    std::vector<AlignedRead> frontier_read_reqs;
+    std::vector<std::pair<unsigned, std::pair<unsigned, unsigned *>>>
+        cached_nhoods;
+    bool first_round = false;
+    while (k < cur_list_size) {
+      auto nk = cur_list_size;
+      // clear iteration state
+      frontier.clear();
+      frontier_nhoods.clear();
+      frontier_read_reqs.clear();
+      cached_nhoods.clear();
+      sector_scratch_idx = 0;
+      // find new beam
+      // WAS: _u64 marker = k - 1;
+      _u32 marker = k;
+      _u32 num_seen = 0;
+      while (marker < cur_list_size && frontier.size() < beam_width &&
+             num_seen < beam_width) {
+        if (retset[marker].flag) {
+          num_seen++;
+          auto iter = nhood_cache.find(retset[marker].id);
+          if (iter != nhood_cache.end()) {
+            cached_nhoods.push_back(
+                std::make_pair(retset[marker].id, iter->second));
+          #pragma omp atomic
+            cache_hit++;
+            if (stats != nullptr) {
+              stats->n_cache_hits++;
+            }
+          } else {
+            frontier.push_back(retset[marker].id);
+          }
+          retset[marker].flag = false;
+          if (this->count_visited_nodes) {
+            reinterpret_cast<std::atomic<_u32> &>(
+                this->node_visit_counter[retset[marker].id].second)
+                .fetch_add(1);
+          }
+        }
+        marker++;
+      }
+
+      // read nhoods of frontier ids
+      if (!frontier.empty()) {
+        if (stats != nullptr)
+          stats->n_hops++;
+        for (_u64 i = 0; i < frontier.size(); i++) {
+          auto id = frontier[i];
+          std::pair<_u32, char *> fnhood;
+          fnhood.first = id;
+          fnhood.second = sector_scratch + sector_scratch_idx * SECTOR_LEN;
+          sector_scratch_idx++;
+          frontier_nhoods.push_back(fnhood);
+          frontier_read_reqs.emplace_back(
+              NODE_SECTOR_NO(((size_t) id)) * SECTOR_LEN, SECTOR_LEN,
+              fnhood.second);
+          if (stats != nullptr) {
+            stats->n_4k++;
+            stats->n_ios++;
+          }
+          num_ios++;
+        }
+        io_timer.reset();
+#ifdef USE_BING_INFRA
+        reader->read(frontier_read_reqs, ctx, true);  // async reader windows.
+#else
+        reader->read(frontier_read_reqs, ctx);  // synchronous IO linux
+#endif
+        if (stats != nullptr) {
+          stats->io_us += io_timer.elapsed();
+        }
+      }
+      auto t_id = omp_get_thread_num();
+      // process cached nhoods
+      for (auto &cached_nhood : cached_nhoods) {
+        if (traveled[t_id].size() == 0 || first_round){
+          traveled[t_id].emplace_back(cached_nhood.first);
+          first_round = true;
+        }
+      #pragma omp atomic
+        total_travel++;
+        auto global_cache_iter = coord_cache.find(cached_nhood.first);
+        T *  node_fp_coords = global_cache_iter->second;
+        T *  node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
+        data_buf_idx++;
+        memcpy(node_fp_coords_copy, node_fp_coords, data_dim * sizeof(T));
+        float cur_expanded_dist = dist_cmp->compare(query, node_fp_coords_copy,
+                                                    (unsigned) aligned_dim);
+        bool exclude_cur_node = false;
+        if (exclude_nodes != nullptr) {
+          exclude_cur_node =
+              (exclude_nodes->find(cached_nhood.first) != exclude_nodes->end());
+        }
+        // only figure in final list if
+        if (!exclude_cur_node) {
+          // added for IndexMerger calls
+          if (coord_map != nullptr) {
+            coord_map->insert(
+                std::make_pair(cached_nhood.first, node_fp_coords_copy));
+          }
+          full_retset.push_back(
+              Neighbor((unsigned) cached_nhood.first, cur_expanded_dist, true));
+        }
+        _u64      nnbrs = cached_nhood.second.first;
+        unsigned *node_nbrs = cached_nhood.second.second;
+
+        // compute node_nbrs <-> query dists in PQ space
+        cpu_timer.reset();
+        compute_dists(node_nbrs, nnbrs, dist_scratch);
+        if (stats != nullptr) {
+          stats->n_cmps += nnbrs;
+          stats->cpu_us += cpu_timer.elapsed();
+        }
+
+        // process prefetched nhood
+        for (_u64 m = 0; m < nnbrs; ++m) {
+          unsigned id = node_nbrs[m];
+          if (visited.find(id) != visited.end()) {
+            continue;
+          } else {
+            visited.insert(id);
+            cmps++;
+            float dist = dist_scratch[m];
+            // std::cout << "cmp: " << id << ", dist: " << dist <<
+            // std::endl; std::cerr << "dist: " << dist << std::endl;
+            if (dist >= retset[cur_list_size - 1].distance &&
+                (cur_list_size == l_search))
+              continue;
+            Neighbor nn(id, dist, true);
+            auto     r = InsertIntoPool(
+                retset.data(), cur_list_size,
+                nn);  // Return position in sorted list where nn inserted.
+            if (cur_list_size < l_search)
+              ++cur_list_size;
+            if (r < nk)
+              nk = r;  // nk logs the best position in the retset that was
+            // updated
+            // due to neighbors of n.
+          }
+        }
+      }
+#ifdef USE_BING_INFRA
+      // process each frontier nhood - compute distances to unvisited nodes
+      int completedIndex = -1;
+      // If we issued read requests and if a read is complete or there are reads
+      // in wait
+      // state, then enter the while loop.
+      while (frontier_read_reqs.size() > 0 &&
+             getNextCompletedRequest(ctx, frontier_read_reqs.size(),
+                                     completedIndex)) {
+        if (completedIndex == -1) {  // all reads are waiting
+          continue;
+        }
+        auto &frontier_nhood = frontier_nhoods[completedIndex];
+        (*ctx.m_pRequestsStatus)[completedIndex] = IOContext::PROCESS_COMPLETE;
+#else
+      for (auto &frontier_nhood : frontier_nhoods) {
+#endif
+      #pragma omp atomic
+        total_travel++;
+        char *node_disk_buf =
+            OFFSET_TO_NODE(frontier_nhood.second, frontier_nhood.first);
+        unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+        _u64      nnbrs = (_u64)(*node_buf);
+        T *       node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
+        assert(data_buf_idx < MAX_N_CMPS);
+
+        T *node_fp_coords_copy = data_buf + (data_buf_idx * aligned_dim);
+        data_buf_idx++;
+        memcpy(node_fp_coords_copy, node_fp_coords, data_dim * sizeof(T));
+        float cur_expanded_dist =
+            dist_cmp->compare(query, node_fp_coords_copy, (unsigned) data_dim);
+        bool exclude_cur_node = false;
+        if (exclude_nodes != nullptr) {
+          exclude_cur_node = (exclude_nodes->find(frontier_nhood.first) !=
+                              exclude_nodes->end());
+        }
+        // if node is to be excluded from final search results
+        if (!exclude_cur_node) {
+          // added for IndexMerger calls
+          if (coord_map != nullptr) {
+            coord_map->insert(
+                std::make_pair(frontier_nhood.first, node_fp_coords_copy));
+          }
+          full_retset.push_back(
+              Neighbor(frontier_nhood.first, cur_expanded_dist, true));
+        }
+        unsigned *node_nbrs = (node_buf + 1);
+        // compute node_nbrs <-> query dist in PQ space
+        cpu_timer.reset();
+        compute_dists(node_nbrs, nnbrs, dist_scratch);
+        if (stats != nullptr) {
+          stats->n_cmps += nnbrs;
+          stats->cpu_us += cpu_timer.elapsed();
+        }
+
+        cpu_timer.reset();
+        // process prefetch-ed nhood
+        for (_u64 m = 0; m < nnbrs; ++m) {
+          unsigned id = node_nbrs[m];
+          if (visited.find(id) != visited.end()) {
+            continue;
+          } else {
+            visited.insert(id);
+            cmps++;
+            float dist = dist_scratch[m];
+            // std::cerr << "dist: " << dist << std::endl;
+            if (stats != nullptr) {
+              stats->n_cmps++;
+            }
+            if (dist >= retset[cur_list_size - 1].distance &&
+                (cur_list_size == l_search))
+              continue;
+            Neighbor nn(id, dist, true);
+            auto     r = InsertIntoPool(
+                retset.data(), cur_list_size,
+                nn);  // Return position in sorted list where nn inserted.
+            if (cur_list_size < l_search)
+              ++cur_list_size;
+            if (r < nk)
+              nk = r;  // nk logs the best position in the retset that was
+                       // updated
+                       // due to neighbors of n.
+          }
+        }
+
+        if (stats != nullptr) {
+          stats->cpu_us += cpu_timer.elapsed();
+        }
+      }
+
+      // update best inserted position
+      //
+
+      if (nk <= k)
+        k = nk;  // k is the best position in retset updated in this round.
+      else
+        ++k;
+
+      hops++;
+    }
+
+    // re-sort by distance
+    std::sort(full_retset.begin(), full_retset.end(),
+              [](const Neighbor &left, const Neighbor &right) {
+                return left.distance < right.distance;
+              });
+    // === 
+    // auto nearest = full_retset[0].id;
+    // insert_enters_tmp_[t_id] = nearest;
+    // // memcpy(insert_coords_tmp_.data() + aligned_dim * t_id, coord_map->find(nearest)->second, aligned_dim * sizeof(T));
+    // T *c = coord_map->find(nearest)->second;
+    // for (_u64 i = 0; i < data_dim; i++) {
+    //   insert_coords_tmp_[aligned_dim * t_id + i] = static_cast<float>(c[i]);
+    // }
+    // === 
+    // return data to ConcurrentQueue only if popped from it
+    if (passthrough_data == nullptr) {
+      this->thread_data.push(data);
+      this->thread_data.push_notify_all();
+    }
+
+    if (stats != nullptr) {
+      stats->total_us = (double) query_timer.elapsed();
+    }
+  }
   template<typename T, typename TagT>
   void PQFlashIndex<T, TagT>::compute_pq_dists(const T *query, const _u32 *ids,
                                                float *    fp_dists,
@@ -1288,8 +2456,6 @@ namespace diskann {
         }
       }
     }
-
-    // return ctx
     this->thread_data.push(data);
     this->thread_data.push_notify_all();
   }
@@ -1320,8 +2486,8 @@ namespace diskann {
     size_t npts_u64, nchunks_u64;
     delete this->data;
 
-    std::cout << "RELOAD: Loading compressed vectors from "
-              << pq_compressed_vectors << "\n";
+    // std::cout << "RELOAD: Loading compressed vectors from "
+              // << pq_compressed_vectors << "\n";
     diskann::load_bin<_u8>(pq_compressed_vectors, data, npts_u64, nchunks_u64);
     assert(npts_u64 == new_max_pts);
 
@@ -1331,7 +2497,7 @@ namespace diskann {
     // close current FP
     this->reader->close();
 
-    std::cout << "RELOAD: Loading graph from " << disk_index_file << "\n";
+    // std::cout << "RELOAD: Loading graph from " << disk_index_file << "\n";
     // read new graph from disk
     std::ifstream nsg_meta(disk_index_file, std::ios::binary);
 
@@ -1351,7 +2517,7 @@ namespace diskann {
 
     size_t medoid_id_on_file;
     READ_U64(nsg_meta, medoid_id_on_file);
-    std::cout << "Medoid-ID: " << medoid_id_on_file << "\n";
+    // std::cout << "Medoid-ID: " << medoid_id_on_file << "\n";
     this->medoids[0] = medoid_id_on_file;
     this->num_medoids = 1;
     READ_U64(nsg_meta, max_node_len);
@@ -1374,14 +2540,14 @@ namespace diskann {
         std::min(this->nhood_cache.size(), this->coord_cache.size());
 
     // clear cache
-    std::cout << "RELOAD: Clearing cache.\n";
+    // std::cout << "RELOAD: Clearing cache.\n";
     delete[] this->nhood_cache_buf;
     this->nhood_cache.clear();
     delete[] this->coord_cache_buf;
     this->coord_cache.clear();
 
     // refresh cache
-    std::cout << "RELOAD: Caching " << node_cache_count << " nodes.\n";
+    // std::cout << "RELOAD: Caching " << node_cache_count << " nodes.\n";
     std::vector<uint32_t> node_list;
     this->cache_bfs_levels(node_cache_count, node_list);
     this->load_cache_list(node_list);

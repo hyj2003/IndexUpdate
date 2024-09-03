@@ -73,16 +73,68 @@ if (MSVC)
 
 
 else()
-	# set(INTEL_ROOT ~/intel/compilers_and_libraries/linux)
-	set(INTEL_ROOT /opt/intel/oneapi)
-	set(MKL_ROOT ${INTEL_ROOT}/mkl)
-        add_compile_options(-m64 -Wl,--no-as-needed) 
-	link_libraries(mkl_intel_ilp64 mkl_intel_thread mkl_core iomp5 pthread m dl rt)
-	link_directories(${INTEL_ROOT}/2024.2/lib/intel64 ${MKL_ROOT}/2024.2/lib/intel64)
+    # expected path for manual intel mkl installs
+    set(POSSIBLE_OMP_PATHS "/opt/intel/oneapi/compiler/latest/linux/compiler/lib/intel64_lin/libiomp5.so;/usr/lib/x86_64-linux-gnu/libiomp5.so;/opt/intel/lib/intel64_lin/libiomp5.so")
+    foreach(POSSIBLE_OMP_PATH ${POSSIBLE_OMP_PATHS})
+        if (EXISTS ${POSSIBLE_OMP_PATH})
+            get_filename_component(OMP_PATH ${POSSIBLE_OMP_PATH} DIRECTORY)
+        endif()
+    endforeach()
+
+    if(NOT OMP_PATH)
+        message(FATAL_ERROR "Could not find Intel OMP in standard locations; use -DOMP_PATH to specify the install location for your environment")
+    endif()
+    link_directories(${OMP_PATH})
+
+    set(POSSIBLE_MKL_LIB_PATHS "/opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_core.so;/usr/lib/x86_64-linux-gnu/libmkl_core.so;/opt/intel/mkl/lib/intel64/libmkl_core.so")
+    foreach(POSSIBLE_MKL_LIB_PATH ${POSSIBLE_MKL_LIB_PATHS})
+        if (EXISTS ${POSSIBLE_MKL_LIB_PATH})
+            get_filename_component(MKL_PATH ${POSSIBLE_MKL_LIB_PATH} DIRECTORY)
+        endif()
+    endforeach()
+
+    set(POSSIBLE_MKL_INCLUDE_PATHS "/opt/intel/oneapi/mkl/latest/include;/usr/include/mkl;/opt/intel/mkl/include/;")
+    foreach(POSSIBLE_MKL_INCLUDE_PATH ${POSSIBLE_MKL_INCLUDE_PATHS})
+        if (EXISTS ${POSSIBLE_MKL_INCLUDE_PATH})
+            set(MKL_INCLUDE_PATH ${POSSIBLE_MKL_INCLUDE_PATH})
+        endif()
+    endforeach()
+    if(NOT MKL_PATH)
+        message(FATAL_ERROR "Could not find Intel MKL in standard locations; use -DMKL_PATH to specify the install location for your environment")
+    elseif(NOT MKL_INCLUDE_PATH)
+        message(FATAL_ERROR "Could not find Intel MKL in standard locations; use -DMKL_INCLUDE_PATH to specify the install location for headers for your environment")
+    endif()
+    if (EXISTS ${MKL_PATH}/libmkl_def.so.2)
+        set(MKL_DEF_SO ${MKL_PATH}/libmkl_def.so.2)
+    elseif(EXISTS ${MKL_PATH}/libmkl_def.so)
+        set(MKL_DEF_SO ${MKL_PATH}/libmkl_def.so)
+    else()
+        message(FATAL_ERROR "Despite finding MKL, libmkl_def.so was not found in expected locations.")
+    endif()
+    link_directories(${MKL_PATH})
+    include_directories(${MKL_INCLUDE_PATH})
+
+    # compile flags and link libraries
+    add_compile_options(-m64 -Wl,--no-as-needed)
+    if (NOT PYBIND)
+        link_libraries(mkl_intel_ilp64 mkl_intel_thread mkl_core iomp5 pthread m dl)
+    else()
+        # static linking for python so as to minimize customer dependency issues
+        link_libraries(
+                ${MKL_PATH}/libmkl_intel_ilp64.a
+                ${MKL_PATH}/libmkl_intel_thread.a
+                ${MKL_PATH}/libmkl_core.a
+                ${MKL_DEF_SO}
+                iomp5
+                pthread
+                m
+                dl
+        )
+    endif()
 endif()
 
 add_definitions(-DMKL_ILP64)
-include_directories(include ${INTEL_ROOT}/2024.2/include ${MKL_ROOT}/2024.2/include)
+include_directories(include ${INTEL_ROOT}/include ${MKL_ROOT}/include)
 # find_package(MKL CONFIG REQUIRED)
 # if(MKL_FOUND)
 #   message(STATUS "MKL found")
@@ -121,10 +173,10 @@ if(MSVC)
 	set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${PROJECT_SOURCE_DIR}/x64/Release)
 	set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${PROJECT_SOURCE_DIR}/x64/Release)
 else()
-	set(ENV{TCMALLOC_LARGE_ALLOC_REPORT_THRESHOLD} 500000000000)
+	# set(ENV{TCMALLOC_LARGE_ALLOC_REPORT_THRESHOLD} 500000000000)
     #	set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG -O0 -fsanitize=address -fsanitize=leak -fsanitize=undefined")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG")
-	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Ofast -DNDEBUG -mavx2 -march=native -mtune=native -ftree-vectorize")
+	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g -Ofast -DNDEBUG -mavx2 -march=native -mtune=native -ftree-vectorize")
 	add_compile_options(-march=native -Wall -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_ACCELERATED_PQ -DUSE_AVX2)
 	# add_compile_options(-march=native -Wall -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_ACCELERATED_PQ -DUSE_AVX2)
 endif()

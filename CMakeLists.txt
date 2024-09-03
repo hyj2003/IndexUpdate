@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-project(P2H LANGUAGES CXX)
+project(IndexUpdate LANGUAGES CXX)
 
 find_package(OpenMP REQUIRED)
 set(ENV{MKLROOT} "/opt/intel/oneapi/mkl/latest")
@@ -32,8 +32,8 @@ FetchContent_MakeAvailable(fmt)
 
 # add_subdirectory(utils)
 # add_subdirectory(ivf)
-add_subdirectory(hnsw)
+# add_subdirectory(hnsw)
 add_subdirectory(FreshDISKANN)
-add_subdirectory(nsg)
+# add_subdirectory(nsg)
 # add_subdirectory(efanna_graph)
 # add_subdirectory(SPFresh)

@@ -122,9 +122,9 @@ if (ROCKSDB)
     add_definitions(-DROCKSDB)
 endif()
 
-add_subdirectory (ThirdParty/zstd/build/cmake)
+# add_subdirectory (ThirdParty/zstd/build/cmake)
 
-add_subdirectory (AnnService)
+# add_subdirectory (AnnService)
 add_subdirectory (Test)
 add_subdirectory (GPUSupport)
 add_subdirectory (Wrappers)

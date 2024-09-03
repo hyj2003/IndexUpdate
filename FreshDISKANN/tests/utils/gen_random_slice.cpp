@@ -21,15 +21,20 @@ template<typename T>
 int aux_main(int argc, char** argv) {
   std::string base_file(argv[2]);
   std::string output_prefix(argv[3]);
-  float       sampling_rate = (float) (std::atof(argv[4]));
-  gen_random_slice<T>(base_file, output_prefix, sampling_rate);
+  // float       sampling_rate = (float) (std::atof(argv[4]));
+  // gen_random_slice<T>(base_file, output_prefix, sampling_rate);
+  size_t number = (size_t)(std::atoi(argv[4]));
+  gen_first_n<T>(base_file, output_prefix, number);
   return 0;
 }
 
 int main(int argc, char** argv) {
   if (argc != 5) {
+    // std::cout << argv[0] << " data_type [float/int8/uint8] base_bin_file "
+    //                         "sample_output_prefix sampling_probability"
+    //           << std::endl;
     std::cout << argv[0] << " data_type [float/int8/uint8] base_bin_file "
-                            "sample_output_prefix sampling_probability"
+                            "sample_output_prefix sampling_number"
               << std::endl;
     exit(-1);
   }

@@ -34,6 +34,60 @@
 
 #define MAX_BLOCK_SIZE 5000000
 //#define SAVE_INFLATED_PQ 1
+template<typename T>
+void gen_first_n(const std::string base_file,
+                 const std::string output_prefix, size_t number) {
+  _u64            read_blk_size = 64 * 1024 * 1024;
+  cached_ifstream base_reader(base_file.c_str(), read_blk_size);
+  std::ofstream sample_writer(std::string(output_prefix + "_data.bin").c_str(),
+                              std::ios::binary);
+  // std::ofstream sample_id_writer(
+  //     std::string(output_prefix + "_ids.bin").c_str(), std::ios::binary);
+
+  // std::random_device
+  //              rd;  // Will be used to obtain a seed for the random number engine
+  // auto         x = rd();
+  // std::mt19937 generator(
+  //     x);  // Standard mersenne_twister_engine seeded with rd()
+  // std::uniform_real_distribution<float> distribution(0, 1);
+
+  size_t   npts, nd;
+  uint32_t npts_u32, nd_u32;
+  uint32_t num_sampled_pts_u32 = 0;
+  uint32_t one_const = 1;
+
+  base_reader.read((char *) &npts_u32, sizeof(uint32_t));
+  base_reader.read((char *) &nd_u32, sizeof(uint32_t));
+  std::cout << "Loading base " << base_file << ". #points: " << npts_u32
+            << ". #dim: " << nd_u32 << "." << std::endl;
+  sample_writer.write((char *) &num_sampled_pts_u32, sizeof(uint32_t));
+  sample_writer.write((char *) &nd_u32, sizeof(uint32_t));
+  // sample_id_writer.write((char *) &num_sampled_pts_u32, sizeof(uint32_t));
+  // sample_id_writer.write((char *) &one_const, sizeof(uint32_t));
+
+  npts = npts_u32;
+  nd = nd_u32;
+  std::unique_ptr<T[]> cur_row = std::make_unique<T[]>(nd);
+
+  for (size_t i = 0; i < npts; i++) {
+    base_reader.read((char *) cur_row.get(), sizeof(T) * nd);
+    if (i < number) {
+      sample_writer.write((char *) cur_row.get(), sizeof(T) * nd);
+      // uint32_t cur_i_u32 = (_u32) i;
+      // sample_id_writer.write((char *) &cur_i_u32, sizeof(uint32_t));
+      num_sampled_pts_u32++;
+    }
+  }
+  sample_writer.seekp(0, std::ios::beg);
+  sample_writer.write((char *) &num_sampled_pts_u32, sizeof(uint32_t));
+  // sample_id_writer.seekp(0, std::ios::beg);
+  // sample_id_writer.write((char *) &num_sampled_pts_u32, sizeof(uint32_t));
+  sample_writer.close();
+  // sample_id_writer.close();
+  std::cout << "Wrote " << num_sampled_pts_u32
+            << " points to sample file: " << output_prefix + "_data.bin"
+            << std::endl;
+}
 
 template<typename T>
 void gen_random_slice(const std::string base_file,
@@ -187,7 +241,6 @@ void gen_random_slice(const T *inputdata, size_t npts, size_t ndims,
     }
   }
 }
-
 // given training data in train_data of dimensions num_train * dim, generate PQ
 // pivots using k-means algorithm to partition the co-ordinates into
 // num_pq_chunks (if it divides dimension, else rounded) chunks, and runs
@@ -902,6 +955,14 @@ int partition_with_ram_budget(const std::string data_file,
 }
 
 // Instantations of supported templates
+template void DISKANN_DLLEXPORT gen_first_n<int8_t>(
+    const std::string base_file, const std::string output_prefix, size_t number);
+template void DISKANN_DLLEXPORT gen_first_n<uint8_t>(
+    const std::string base_file, const std::string output_prefix, size_t number);
+template void DISKANN_DLLEXPORT gen_first_n<float>(
+    const std::string base_file, const std::string output_prefix, size_t number);
+
+
 template void DISKANN_DLLEXPORT gen_random_slice<int8_t>(
     const std::string data_file, double p_val,
     std::unique_ptr<float[]> &sampled_data, size_t &slice_size, size_t &ndims);

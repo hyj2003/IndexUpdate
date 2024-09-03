@@ -61,11 +61,11 @@ namespace diskann {
       : _max_points(max_points), _dim(dim),
         _active_0(true), _active_1(false), _active_del_0(true), _active_del_1(false), _clearing_index_0(false),_clearing_index_1(false), _switching_disk_prefixes(false), _check_switch_index(false), _check_switch_delete(false)
     {
-    _merge_th = MERGE_TH;
+    _merge_th = 1000;
     _mem_index_0 = std::make_shared<diskann::Index<T, TagT>>(
-        diskann::L2, dim, _merge_th * 2, 1, 1, 1, 0);
+        diskann::L2, dim, _merge_th * 4, 1, 1, 1, 0);
     _mem_index_1 = std::make_shared<diskann::Index<T, TagT>>(
-        diskann::L2, dim, _merge_th * 2, 1, 1, 1, 0);
+        diskann::L2, dim, _merge_th * 4, 1, 1, 1, 0);
 
     _paras_mem.Set<unsigned>("L", parameters.Get<unsigned>("L_mem"));
     _paras_mem.Set<unsigned>("R", parameters.Get<unsigned>("R_mem"));
@@ -309,9 +309,10 @@ namespace diskann {
  {
      if(_mem_points >= _merge_th)
      {
-         save_del_set();
-         switch_index();
-         return 1;
+        std::cout << "Merge triggered." << std::endl;
+        save_del_set();
+        switch_index();
+        return 1;
      }
      return 0;
  }
@@ -378,7 +379,7 @@ namespace diskann {
         //make new index active
         if(_active_index == 0)
         {
-            _mem_index_1 = std::make_shared<diskann::Index<T, TagT>>(diskann::L2, _dim, _merge_th * 2 , 1, 1, 1, 0);
+            _mem_index_1 = std::make_shared<diskann::Index<T, TagT>>(diskann::L2, _dim, _merge_th * 4 , 1, 1, 1, 0);
             bool expected_active = false;
             if (_active_1.compare_exchange_strong(expected_active, true)) {
               std::cout << "Initialised new index for _mem_index_1 " << std::endl;
@@ -390,7 +391,7 @@ namespace diskann {
         }
         else
         {
-            _mem_index_0 = std::make_shared<diskann::Index<T, TagT>>(diskann::L2, _dim, _merge_th * 2, 1, 1, 1, 0);
+            _mem_index_0 = std::make_shared<diskann::Index<T, TagT>>(diskann::L2, _dim, _merge_th * 4, 1, 1, 1, 0);
             bool expected_active = false;
             if (_active_0.compare_exchange_strong(expected_active, true)) {
               std::cout << "Initialised new index for _mem_index_0 " << std::endl;
@@ -428,7 +429,7 @@ namespace diskann {
             _mem_index_1.reset();
             _mem_index_1 = nullptr;
             _mem_index_1 = std::make_shared<diskann::Index<T, TagT>>(
-            diskann::L2, _dim, _merge_th * 2, 1, 1, 1, 0);
+            diskann::L2, _dim, _merge_th * 4, 1, 1, 1, 0);
             }
             expected_clearing = true;
             assert(expected_clearing == true);
@@ -446,7 +447,7 @@ namespace diskann {
             _mem_index_0.reset();
             _mem_index_0 = nullptr;
             _mem_index_0 = std::make_shared<diskann::Index<T, TagT>>(
-            diskann::L2, _dim, _merge_th * 2, 1, 1, 1, 0);
+            diskann::L2, _dim, _merge_th * 4, 1, 1, 1, 0);
             }
             expected_clearing = true;
             assert(expected_clearing == true);
