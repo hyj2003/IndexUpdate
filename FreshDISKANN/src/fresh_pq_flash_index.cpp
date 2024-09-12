@@ -23,6 +23,9 @@
 // returns region of `node_buf` containing [COORD(T)]
 #define OFFSET_TO_NODE_COORDS(node_buf) (T *) (node_buf)
 
+#define THREAD_INSERT 5
+#define THREAD_DELETE 5
+
 namespace {
   void aggregate_coords(const unsigned *ids, const _u64 n_ids,
                         const _u8 *all_coords, const _u64 ndims, _u8 *out) {
@@ -70,6 +73,7 @@ namespace {
   }
 
 }  // namespace
+#define PER_THREAD_BUF_SIZE (uint64_t) (65536 * 64 * 4)
 
 namespace diskann {
   template<typename T, typename TagT>
@@ -83,10 +87,16 @@ namespace diskann {
     for (auto iter : delete_cache_) {
       delete[] iter.second.second;
     }
+    while (!scratch_queue_.empty()) {
+      scratch_queue_.pop().output_writer->close();
+    }
+    delete this->update_thread_pq_scratch;
+    delete this->update_thread_pq_scratch_u16;
   }
   template<typename T, typename TagT>
   int FreshPQFlashIndex<T, TagT>::load(uint32_t num_threads, const char *pq_prefix,
-                                  const char *disk_index_file, bool load_tags) {
+                                  const char *disk_index_file, uint32_t max_index_num, 
+                                  bool load_tags) {
     std::string pq_table_bin = std::string(pq_prefix) + "_pivots.bin";
     std::string pq_compressed_vectors =
         std::string(pq_prefix) + "_compressed.bin";
@@ -213,11 +223,35 @@ namespace diskann {
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // num_medoids = 1;
     // load tags
+    this->inv_tags = new _u32[max_index_num];
+    this->max_index_num_ = max_index_num;
     if (load_tags) {
       std::string tag_file = disk_index_file;
       tag_file = tag_file + ".tags";
       this->load_tags(tag_file);
+      TagT *new_tags = new TagT[max_index_num];
+      memcpy(new_tags, this->tags, sizeof(TagT) * this->num_points);
+      delete[] this->tags;
+      this->tags = new_tags;
+      for (_u64 i = 0; i < this->num_points; i++) {
+        this->inv_tags[this->tags[i]] = i;
+      }
     }
+    std::cout << "Allocating thread scratch space -- " << PER_THREAD_BUF_SIZE / (1<<20) << " MB / thread.\n";
+    alloc_aligned((void**) &this->update_thread_pq_scratch, num_threads * PER_THREAD_BUF_SIZE, SECTOR_LEN);
+    alloc_aligned((void**) &this->update_thread_pq_scratch_u16, num_threads * PER_THREAD_BUF_SIZE, SECTOR_LEN);
+    for (uint32_t i = 0; i < num_threads; i++) {
+      UpdateThreadData<T> u_data;
+      u_data.scratch.scratch_ = this->update_thread_pq_scratch;
+      u_data.scratch.scratch_u16_ = this->update_thread_pq_scratch_u16;
+      u_data.ctx = this->reader->get_ctx();
+      u_data.output_writer = new std::fstream;
+      u_data.output_writer->open(this->disk_index_file, std::ios::out | std::ios::binary);
+      scratch_queue_.push(u_data);
+      scratch_queue_.push_notify_all();
+    }
+    this->in_degree_ = new _u32[max_index_num];
+
     return 0;
   }
   template<typename T, typename TagT>
@@ -231,6 +265,7 @@ namespace diskann {
     tsl::robin_set<uint32_t> disk_deleted_ids;
     for(size_t i = 0; i < tag_num; i++) {
       deleted_tags.insert(*(tag_data + i));
+      // RecycleId(*(tag_data + i));
     }
     for(uint32_t i=0; i < this->num_points; i++) {
       TagT i_tag = this->tags[i];
@@ -274,9 +309,70 @@ namespace diskann {
     // free buf
     aligned_free((void*) buf);
     assert(deleted_nodes.size() == disk_deleted_ids.size());
-    assert(disk_deleted_nhoods.size() == disk_deleted_ids.size());
   }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::ComputeInDegree() {
+    uint64_t sectors_per_scan = SECTORS_PER_MERGE;
+    char* buf = nullptr;
+    alloc_aligned((void**)&buf, sectors_per_scan * SECTOR_LEN, SECTOR_LEN);
+    uint64_t backing_buf_size = (uint64_t) sectors_per_scan * ROUND_UP(this->max_node_len, 32);
+    backing_buf_size = ROUND_UP(backing_buf_size, 256);
+    char* backing_buf = nullptr;
+    alloc_aligned((void**) &backing_buf, backing_buf_size, 256);
+    memset(backing_buf, 0, backing_buf_size);
+    uint64_t backing_buf_unit_size = ROUND_UP(this->max_node_len, 32);
+    uint64_t backing_buf_idx = 0;
 
+    ThreadData<T> data = this->thread_data.pop();
+    while (data.scratch.sector_scratch == nullptr) {
+      this->thread_data.wait_for_push_notify();
+      data = this->thread_data.pop();
+    }
+    IOContext ctx = data.ctx;
+    uint32_t                 n_scanned = 0;
+    uint32_t                 base_offset = NODE_SECTOR_NO(0) * SECTOR_LEN;
+    std::vector<AlignedRead> reads(1);
+    reads[0].buf = buf;
+    reads[0].len = sectors_per_scan * SECTOR_LEN;
+    reads[0].offset = base_offset;
+    while (n_scanned < this->num_points) {
+      memset(buf, 0, sectors_per_scan * SECTOR_LEN);
+      assert(this->reader);
+
+      this->reader->read(reads, ctx);
+      backing_buf_idx = 0;
+      // scan each sector
+      for (uint32_t i = 0; i < sectors_per_scan && n_scanned < this->num_points;
+           i++) {
+        char *sector_buf = buf + i * SECTOR_LEN;
+        // scan each node
+        for (uint32_t j = 0;
+             j < this->nnodes_per_sector && n_scanned < this->num_points; j++) {
+          char *node_buf = OFFSET_TO_NODE(sector_buf, n_scanned);
+          // if in delete_set, add to deleted_nodes
+          if (this->delete_cache_.find(n_scanned) == this->delete_cache_.end()) {
+            char *buf_start =
+                backing_buf + (backing_buf_idx * backing_buf_unit_size);
+            backing_buf_idx++;
+            memcpy(buf_start, node_buf, this->max_node_len);
+            // create disk node object from backing buf instead of `buf`
+            DiskNode<T> node(n_scanned, OFFSET_TO_NODE_COORDS(buf_start),
+                             OFFSET_TO_NODE_NHOOD(buf_start));
+            uint32_t nnbrs = node.nnbrs;
+            unsigned *nbrs = node.nbrs;
+            for (uint32_t j = 0; j < nnbrs; j++) {
+              this->in_degree_[nbrs[j]]++;
+            }
+          }
+          n_scanned++;
+        }
+      }
+      backing_buf_idx = 0;
+    }
+    this->thread_data.push(data);
+    this->thread_data.push_notify_all();
+    aligned_free((void*) buf);
+  }
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::filtered_beam_search(
       const T *query, const _u64 k_search, const _u64 l_search, _u64 *indices,
@@ -472,7 +568,7 @@ namespace diskann {
         }
       }
       {
-      std::shared_lock<std::shared_mutex> guard(this->delete_cache_lock_);
+      std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
       // process cached nhoods
       for (auto &cached_nhood : cached_nhoods) {
         auto global_cache_iter = this->coord_cache.find(cached_nhood.first);
@@ -524,6 +620,17 @@ namespace diskann {
             }
           }
         }
+        {
+          std::shared_lock<std::shared_mutex> insert_guard(this->insert_edges_lock_);
+          auto iter = this->insert_edges_.find(cached_nhood.first);
+          if (iter != this->insert_edges_.end()) {
+            for (auto id : iter->second) {
+              if (this->del_filter_.get(id)) continue;
+              n_ids.emplace_back(id);
+            }
+          }
+        }
+        assert(n_ids.size() < maxc);
         cpu_timer.reset();
         compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
         if (stats != nullptr) {
@@ -558,6 +665,9 @@ namespace diskann {
       }
       if (!frontier.empty()) {
         this->reader->get_events(ctx, n_ops);
+      }
+      for (auto &reqs : frontier_read_reqs) {
+        // PushVisitedPage(reqs.offset / SECTOR_LEN, (char *)reqs.buf); // send current page to page processor
       }
       for (auto &frontier_nhood : frontier_nhoods) {
         char *node_disk_buf =
@@ -612,6 +722,17 @@ namespace diskann {
             }
           }
         }
+        {
+          std::shared_lock<std::shared_mutex> insert_guard(this->insert_edges_lock_);
+          auto iter = this->insert_edges_.find(frontier_nhood.first);
+          if (iter != this->insert_edges_.end()) {
+            for (auto id : iter->second) {
+              if (this->del_filter_.get(id)) continue;
+              n_ids.emplace_back(id);
+            }
+          }
+        }
+        assert(n_ids.size() < maxc);
         cpu_timer.reset();
         compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
         if (stats != nullptr) {
@@ -672,7 +793,290 @@ namespace diskann {
       stats->total_us = (double) query_timer.elapsed();
     }
   }
-
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::occlude_list_pq_simd(std::vector<Neighbor> &pool, 
+                                                        const uint32_t id, 
+                                                        std::vector<Neighbor> &result, 
+                                                        std::vector<float> &occlude_factor, 
+                                                        uint8_t* scratch,
+                                                        uint16_t* scratch_u16) {
+    if (pool.empty())
+      return;
+    assert(std::is_sorted(pool.begin(), pool.end()));
+    assert(!pool.empty());
+    const size_t kSize = 64;
+    const _u64 nchunks = this->n_chunks;
+    uint8_t *scratch_T = scratch + 256 * nchunks;
+    { // reorder pq code for simd
+      for (size_t i = 0; i < pool.size(); i += kSize) {
+        size_t len = std::min(pool.size() - i, kSize);
+        uint8_t* pq = scratch_T + i * nchunks;
+        if (len != kSize) {
+          memset(pq, 0, sizeof(uint8_t) * kSize * nchunks);
+        }
+        for (size_t j = 0; j < len; j++) {
+          for (size_t k = 0; k < nchunks; k++) {
+            pq[k * kSize + j] = this->data[nchunks * pool[i + j].id + k];
+          }
+        }
+      }
+    }
+    PQComputer<T> *computer = 
+      new PQComputer<T>(this->data,
+                     scratch_T,
+                     std::min(pool.size(), this->maxc),
+                     nchunks,
+                     scratch,
+                     &this->pq_table);
+    uint16_t *dist_u16 = scratch_u16;
+    float cur_alpha = 1;
+    size_t rerank_size = range + 20;
+    while (cur_alpha <= alpha && result.size() < rerank_size) {
+      uint32_t start = 0;
+      while (result.size() < rerank_size && (start) < pool.size() && start < maxc) {
+        auto &p = pool[start];
+        if (occlude_factor[start] > cur_alpha) {
+          start++;
+          continue;
+        }
+        occlude_factor[start] = std::numeric_limits<float>::max();
+        result.push_back(p);
+        computer->compute_batch_dists(this->data + pool[start].id * nchunks, 
+                                      start / 64 * 64, 
+                                      dist_u16 + start / 64 * 64);
+        for (uint32_t t = start + 1; t < pool.size() && t < maxc; t++) {
+          if (occlude_factor[t] > alpha)
+            continue;
+          // djk = dist(p.id, pool[t.id])
+          float djk = static_cast<float>(dist_u16[t]);
+          occlude_factor[t] = (std::max)(occlude_factor[t], pool[t].distance / djk);
+        }
+        start++;
+      }
+      cur_alpha *= 1.2;
+    }
+    for (auto &iter : result) {
+      this->compute_pq_dists(id, &(iter.id), &iter.distance, 1, scratch);
+    }
+    sort(result.begin(), result.end());
+    result.resize(range);
+  }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::PruneNeighbors(DiskNode<T> &disk_node, 
+                                                  std::vector<_u32> &new_nbrs,
+                                                  _u8 *scratch, _u16 *scratch_u16) {
+    std::vector<float> id_nhood_dists(new_nbrs.size(), 0.0f);
+    assert(scratch != nullptr);
+    _u32 id = disk_node.id;
+    {
+      auto computer = new PQComputer(this->data, 
+                                    nullptr, 
+                                    new_nbrs.size(), 
+                                    this->n_chunks, 
+                                    nullptr, 
+                                    &this->pq_table);
+      computer->compute_pq_dists(id, new_nbrs.data(), id_nhood_dists.data(), new_nbrs.size());
+    }
+    std::vector<Neighbor> cand_nbrs(new_nbrs.size());
+    for (size_t i = 0; i < std::min(this->maxc * 2, new_nbrs.size()); i++) {
+      cand_nbrs[i].id = new_nbrs[i];
+      cand_nbrs[i].distance = id_nhood_dists[i];
+    }
+    // sort and keep only maxc neighbors
+    std::sort(cand_nbrs.begin(), cand_nbrs.end());
+    if (cand_nbrs.size() > this->maxc) {
+      cand_nbrs.resize(this->maxc);
+    }
+    std::vector<Neighbor> pruned_nbrs;
+    std::vector<float> occlude_factor(cand_nbrs.size(), 0.0f);
+    pruned_nbrs.reserve(this->range);
+    this->occlude_list_pq_simd(cand_nbrs, id, pruned_nbrs, occlude_factor, scratch, scratch_u16);
+    // copy back final nbrs
+    disk_node.nnbrs = pruned_nbrs.size();
+    *(disk_node.nbrs - 1) = disk_node.nnbrs;
+    for (uint32_t i = 0; i < pruned_nbrs.size(); i++) {
+      disk_node.nbrs[i] = pruned_nbrs[i].id;
+    }
+  }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::ProcessPage(_u64 sector_id, UpdateThreadData<T> *upd) {
+    char *sector_buf = upd->scratch.page_buf_;
+    char *tmp_buf = upd->scratch.page_buf_copied_;
+    memcpy(tmp_buf, sector_buf, SECTOR_LEN);
+    assert(sector_id != 0);
+    _u32 cur_node_id = (sector_id - 1) * this->nnodes_per_sector;
+    std::vector<DiskNode<T>> disk_nodes;
+    for (uint32_t i = 0; i < this->nnodes_per_sector && cur_node_id < this->num_points; i++) {
+      disk_nodes.emplace_back(cur_node_id, 
+                              OFFSET_TO_NODE_COORDS(sector_buf),
+                              OFFSET_TO_NODE_NHOOD(sector_buf));
+      cur_node_id++;
+    }
+    std::vector<_u32> del_nbrs;
+    for (auto &disk_node : disk_nodes) {
+      std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
+      std::shared_lock<std::shared_mutex> insert_guard(this->insert_edges_lock_);
+      auto      id = disk_node.id;
+      auto      nnbrs = disk_node.nnbrs;
+      unsigned *nbrs = disk_node.nbrs;
+      std::vector<_u32> new_nbrs;
+      bool change = false;
+      for (uint32_t i = 0; i < nnbrs; i++) {
+        if (!del_filter_.get(nbrs[i])) {
+          new_nbrs.emplace_back(nbrs[i]);
+        } else {
+          // if (--mark[nbrs[i]] == 0) ... (atomic)
+          change = true;
+          del_nbrs.emplace_back(nbrs[i]);
+          auto iter = this->delete_cache_.find(nbrs[i]);
+          auto m = iter->second.first;
+          auto nei = iter->second.second;
+          for (_u32 j = 0; j < m; j++) {
+            if (!del_filter_.get(nei[j])) {
+              new_nbrs.emplace_back(nei[j]);
+            }
+          }
+        }
+      }
+      auto iter = this->insert_edges_.find(id);
+      if (iter != insert_edges_.end()) {
+        change = true;
+        for (auto nbrs : iter->second) {
+          if (del_filter_.get(nbrs)) 
+            continue;
+          new_nbrs.emplace_back(nbrs);
+        }
+        this->insert_edges_.erase(iter);
+      }
+      if (change) {
+        uint8_t *scratch = upd->scratch.scratch_;
+        uint16_t *scratch_u16 = upd->scratch.scratch_u16_;
+        PruneNeighbors(disk_node, new_nbrs, scratch, scratch_u16);
+      }
+    }
+    {
+      std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
+      page_cache_.insert(std::make_pair(sector_id, tmp_buf));
+    }
+    /* write on page[sector_id] */
+    std::fstream &output_writer = *upd->output_writer;
+    this->dump_to_disk(output_writer, disk_nodes, (sector_id - 1) * this->nnodes_per_sector, sector_buf, 1);
+    output_writer.flush();
+    {
+      std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
+      page_cache_.erase(sector_id);
+    }
+    /* Finish updating */
+    this->scratch_queue_.push(*upd);
+    this->scratch_queue_.push_notify_all();
+    {
+      std::unique_lock<std::shared_mutex> guard(this->in_degree_lock_);
+      for (auto id : del_nbrs) {
+        auto iter = in_degree_cnt_.find(id);
+        if (iter->second <= 1) {
+          in_degree_cnt_.erase(iter);
+          std::unique_lock<std::shared_mutex> del_guard(this->delete_cache_lock_);
+          auto d_iter = delete_cache_.find(id);
+          delete[] d_iter->second.second;
+          delete_cache_.erase(d_iter);
+        } else {
+          in_degree_cnt_.insert(std::make_pair(id, iter->second - 1));
+        }
+      }
+    }
+  }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::PushVisitedPage(_u64 sector_id, char *sector_buf) {
+    /* copy buffers */
+    UpdateThreadData<T> data = this->scratch_queue_.pop();
+    while (data.scratch.page_buf_ == nullptr) {
+      this->scratch_queue_.wait_for_push_notify();
+      data = this->scratch_queue_.pop();
+    }
+    // IOContext ctx = data.ctx;
+    memcpy(data.scratch.page_buf_, sector_buf, SECTOR_LEN);
+    auto new_req = std::make_pair(sector_id, &data);
+    reqs_queue_.push(new_req);
+    reqs_queue_.push_notify_all();
+  }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::ProcessUpdateRequests(bool update_flag) {
+    /* Get a request */
+    auto req = this->reqs_queue_.pop();
+    while (update_flag && req.second == nullptr) {
+      this->reqs_queue_.wait_for_push_notify();
+      req = this->reqs_queue_.pop();
+    }
+    if (!update_flag) {
+      return ;
+    }
+    /* Check if a page is already in processing */
+    {
+      std::unique_lock<std::shared_mutex> guard(this->page_in_process_lock_);
+      if (page_in_process_.find(req.first) != page_in_process_.end()) {
+        return ;
+      } else {
+        page_in_process_.insert(req.first);
+      }
+    }
+    /* Process a page */
+    ProcessPage(req.first, req.second);
+  }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::PushDelete(_u32 external_id) { // need to set delete filter
+    /* Read then process*/
+    _u32 internal_id = this->inv_tags[external_id];
+    /* Read */
+    UpdateThreadData<T> data = this->scratch_queue_.pop();
+    while (data.scratch.page_buf_ == nullptr) {
+      this->scratch_queue_.wait_for_push_notify();
+      data = this->scratch_queue_.pop();
+    }
+    IOContext ctx = data.ctx;
+    std::vector<AlignedRead> read_reqs;
+    read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, data.scratch.page_buf_);
+    this->reader->read(read_reqs, ctx);
+    char *node_disk_buf =
+          OFFSET_TO_NODE(data.scratch.page_buf_, internal_id);
+    unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+    _u64      nnbrs = (_u64)(*node_buf);
+    unsigned *node_nbrs = (node_buf + 1);
+    unsigned *node_nbrs_copied = new unsigned[nnbrs];
+    memcpy(node_nbrs_copied, node_nbrs, sizeof(unsigned) * nnbrs);
+    {
+      std::unique_lock<std::shared_mutex> guard(delete_cache_lock_);
+      delete_cache_.insert(std::make_pair(internal_id, std::make_pair(nnbrs, node_nbrs_copied)));
+      this->del_filter_.set(internal_id);
+    }
+    {
+      std::unique_lock<std::shared_mutex> guard(in_degree_lock_);
+      for (_u64 i = 0; i < nnbrs; i++) {
+        this->in_degree_[node_nbrs[i]]--;
+      }
+    }
+    // ProcessPage(NODE_SECTOR_NO(((size_t) internal_id)), &data);
+    PushVisitedPage(NODE_SECTOR_NO(((size_t) internal_id)), data.scratch.page_buf_);
+    /* release free ids*/
+    // RecycleId(internal_id);
+  }
+  template<typename T, typename TagT>
+  void FreshPQFlashIndex<T, TagT>::PushInsert(_u32 external_id, T *point) {
+    /* Assign an internal id & update tags */
+    _u32 internal_id = GetInternalId();
+    std::vector<uint8_t> pq_coords = this->deflate_vector(point);
+    uint64_t pq_offset = (uint64_t) internal_id * (uint64_t) this->n_chunks;
+    memcpy(this->data + pq_offset, pq_coords.data(), this->n_chunks * sizeof(uint8_t));
+    /* Search */
+    std::vector<_u64> res(range);
+    this->filtered_beam_search(point, range, 75, res.data(), nullptr, 2, nullptr, nullptr, nullptr);
+    /* Add edges */
+    std::unique_lock<std::shared_mutex> guard(insert_edges_lock_);
+    for (auto id : res) {
+      insert_edges_[id].emplace_back(internal_id);
+    }
+    std::vector<_u32> ins(res.begin(), res.end());
+    insert_edges_.insert(std::make_pair(internal_id, std::move(ins)));
+  }
   // instantiations
   template class FreshPQFlashIndex<float, int32_t>;
   template class FreshPQFlashIndex<_s8, int32_t>;

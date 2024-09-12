@@ -4,7 +4,7 @@
 #include "v2/fs_allocator.h"
 #include "tsl/robin_map.h"
 #include "tsl/robin_set.h"
-#include "pq_flash_index.h"
+#include "fresh_pq_flash_index.h"
 #include "linux_aligned_file_reader.h"
 #include "index.h"
 #include <algorithm>
@@ -12,10 +12,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
-
-
-extern std::string TMP_FOLDER;
-
+#include <future>
 namespace diskann {
   template<typename T, typename TagT=uint32_t>
   class IndexUpdater {
@@ -31,134 +28,42 @@ namespace diskann {
       // range : max out-degree
       // l_index : L param for indexing
       // maxc : max num of candidates to consider while pruning
-      IndexUpdater(const char* disk_in, const std::vector<std::string> &mem_in, const char* disk_out,
-                  const char* deleted_tags, const uint32_t ndims, Distance<T>* dist, const uint32_t beam_width,
+      IndexUpdater(const char* disk_in, Distance<T>* dist, const uint32_t beam_width,
                   const uint32_t range, const uint32_t l_index, const float alpha, const uint32_t maxc);
       ~IndexUpdater();
-
-      // merge all memory indices into the disk index and write out new disk index
-      void merge();
-      void optimized_merge();
+      void UpdateThreadSetup(size_t background_threads_num);
+      int insert(T *point, TagT id) {
+        this->disk_index->PushInsert(id, point);
+        return 0;
+      }
+      void remove(TagT id) {
+        this->disk_index->PushDelete(id);
+      }
+      void search(const T* query, const uint64_t K, const uint64_t search_L,
+                     TagT* tags, float * distances, QueryStats * stats) {
+        size_t                                    searchK = K;
+        std::vector<_u64>                         query_result_ids_64(searchK);
+        std::vector<float>                        query_result_dists(searchK);
+        std::vector<TagT>                         query_result_tags(searchK);
+        disk_index->filtered_beam_search(
+              query, searchK, search_L, query_result_ids_64.data(),
+              query_result_dists.data(), this->beam_width, nullptr, nullptr, query_result_tags.data());
+        for (size_t i = 0; i < searchK; i++) {
+          tags[i] = query_result_tags[i];
+          distances[i] = query_result_dists[i];
+          std::cout << tags[i] << " ";
+        }
+        std::cout << '\n';
+      }
+      void StopUpdate() {
+        this->update_flag_ = false;
+      }
     private:
-      /* insert related funcs */
-      void process_inserts();
-      void process_inserts_pq();
-      void optimized_process_inserts();
-      void insert_mem_vec(const T* vec, const uint32_t offset_id);
-      void optimized_insert_mem_vec(const T* vec, const uint32_t offset_id, const _u32 t_id, const std::vector<_u32> &enters);
-      void offset_iterate_to_fixed_point(const T* vec, const uint32_t offset_id, const uint32_t Lsize,
-                                         std::vector<Neighbor> &expanded_nodes_info, 
-                                         tsl::robin_map<uint32_t, T*> &coord_map);
-      void cached_offset_iterate_to_fixed_point(const T* vec, const uint32_t offset_id, const uint32_t Lsize,
-                                                std::vector<Neighbor> &expanded_nodes_info, 
-                                                tsl::robin_map<uint32_t, T*> &coord_map, const _u32 t_id, const std::vector<_u32> &enters);
-      // used to prune insert() edges
-      void prune_neighbors(const T* vec, const tsl::robin_map<uint32_t, T*> &coord_map,
-                           std::vector<Neighbor> &pool, std::vector<uint32_t> &pruned_list);
-      // used to prune inter-insert() edges
-      void prune_neighbors_pq(const uint32_t id, std::vector<Neighbor> &pool, 
-                              std::vector<uint32_t> &pruned_list, uint8_t* scratch = nullptr);
-      void occlude_list(std::vector<Neighbor> &pool, const T *vec,
-                        const tsl::robin_map<uint32_t, T*> &coord_map,
-                        std::vector<Neighbor> &result, std::vector<float> &occlude_factor);
-      void occlude_list_pq(std::vector<Neighbor> &pool, const uint32_t id,
-                           std::vector<Neighbor> &result, std::vector<float> &occlude_factor,
-                           uint8_t* scratch = nullptr);
-      void occlude_list_pq_simd(std::vector<Neighbor> &pool, 
-                                const uint32_t id, 
-                                std::vector<Neighbor> &result, 
-                                std::vector<float> &occlude_factor, 
-                                uint8_t* scratch,
-                                uint16_t* scratch_u16);
-      void dump_to_disk(const std::vector<DiskNode<T>> &disk_nodes, const uint32_t start_id, 
-                        const char* buf, const uint32_t n_sector);
-
-      /* delete related funcs */
-      // converts tags into deleted IDs
-      void compute_deleted_ids();
-      // process all deletes
-      void process_deletes();
-      void optimized_process_deletes();
-      // reads nhoods of all deleted nods
-      void populate_deleted_nhoods();
-      void optimized_populate_deleted_nhoods();
-      // eliminates references to deleted nodes in id_nhoods
-      void consolidate_deletes(DiskNode<T> &disk_node, uint8_t* scratch = nullptr);
-      void optimized_consolidate_deletes(DiskNode<T> &disk_node, 
-                                         uint8_t* scratch = nullptr, 
-                                         uint16_t* scratch_u16 = nullptr);
-//	  std::cout << id << " , " << nhood.size() << std::endl;
-//	  for(auto nbr : nhood)
-//		  std::cout << nbr << " , " ;
-//	  std::cout << std::endl;
-      // whether the specific node is to be deleted in current merge - work done 
-      bool is_deleted(const DiskNode<T> &disk_node);
-
-      /* rename related funcs */ 
-      // assign smallest free IDs to new inserts
-      void compute_rename_map();
-      void rename(DiskNode<T> &node) const;
-      void rename(std::vector<uint32_t> &nhood) const;
-      // returns uint32_t::max() upon failure
-      uint32_t rename(uint32_t id) const;
-      // returns uint32_t::max() upon failure
-      uint32_t rename_inverse(uint32_t renamed_id) const;
-      // returns ID of mem index offset_id belongs to; uint32_t::max() otherwise
-      const uint32_t get_index_id(const uint32_t offset_id) const;
-      std::vector<uint32_t> get_edge_list(const uint32_t offset_id);
-      const T* get_mem_data(const uint32_t offset_id);
-
-      /* merge related funcs */
-      void write_tag_file(const std::string &tag_out_filename, const uint32_t npts);
-      void process_merges();
-
-      // deletes
-      tsl::robin_set<TagT> deleted_tags;
-      tsl::robin_map<uint32_t, std::vector<uint32_t>> disk_deleted_nhoods;
-      tsl::robin_set<uint32_t> disk_deleted_ids;
-      std::vector<tsl::robin_set<uint32_t>> mem_deleted_ids;
-      char* delete_backing_buf = nullptr;
-      // DeleteNeighbors<T>* delete_neighbor_set_;
-
-      // rename stuff
-      tsl::robin_map<uint32_t, uint32_t> rename_map;
-      tsl::robin_map<uint32_t, uint32_t> inverse_map;
-      std::vector<std::pair<uint32_t, uint32_t>> rename_list;
-      std::vector<std::pair<uint32_t, uint32_t>> inverse_list;
-
-      // disk index
-      GraphDelta *disk_delta;
-      PQFlashIndex<T, TagT> *disk_index;
-      std::vector<uint32_t> init_ids;
-      uint8_t* pq_data = nullptr;
-      TagT* disk_tags = nullptr;
-      uint32_t pq_nchunks;
-      uint32_t max_node_len, nnodes_per_sector, disk_npts;
-      std::string disk_index_out_path, disk_index_in_path, pq_coords_file;
-      std::fstream output_writer;
-      std::vector<ThreadData<T>> disk_thread_data;
-      // mem-index
-      std::vector<GraphDelta*> mem_deltas;
-      std::vector<Index<T, TagT>*> mem_indices;
-      std::vector<const std::vector<std::vector<uint32_t>>*> mem_graphs;
-      std::vector<const T*> mem_data;
-      std::vector<std::unique_ptr<TagT[]>> mem_tags;
-      std::vector<uint32_t> offset_ids;
-      std::vector<uint32_t> mem_npts;
       Distance<T> *dist_cmp;
-      T* _data_load;
 
       // allocators
       // FixedSizeAlignedAllocator<T> *fp_alloc = nullptr;
       // FixedSizeAlignedAllocator<uint8_t> *pq_alloc = nullptr;
-
-      // book keeping
-      std::vector<uint32_t> free_ids;
-      uint8_t* thread_pq_scratch = nullptr;
-      std::vector<uint8_t*> thread_bufs;
-
-      uint16_t* thread_pq_scratch_u16 = nullptr;
-      std::vector<uint16_t*> thread_bufs_u16;
 
       // vector info
       uint32_t ndims, aligned_ndims;
@@ -166,10 +71,8 @@ namespace diskann {
       uint32_t beam_width;
       uint32_t l_index, range, maxc;
       float alpha;
-
-      // timing stuff
-      std::vector<double> insert_times, delta_times, search_times, prune_times;
-      double avg_ef = 0;    
-      std::mutex _print_lock;
+      bool update_flag_;
+      FreshPQFlashIndex<T, TagT> *disk_index = nullptr;
+      std::vector<std::future<void>> back_threads_;
   };
 }; // namespace diskann

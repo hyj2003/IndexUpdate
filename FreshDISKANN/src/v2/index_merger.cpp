@@ -172,7 +172,7 @@ namespace diskann {
     aligned_free((void*) this->thread_pq_scratch_u16);
     for(auto &data : this->mem_data)
     {
-	delete [] data;
+	    delete [] data;
     }
   }
 
@@ -965,6 +965,7 @@ namespace diskann {
     uint32_t start_id = 0, new_start_id;
     std::cout << "Consolidating deletes\n";
     this->avg_ef = 0;
+    std::vector<uint32_t> cnt(this->disk_npts);
     while(start_id < this->disk_npts) {
       new_start_id = this->disk_index->merge_read(disk_nodes, start_id, SECTORS_PER_MERGE, buf);
  #pragma omp parallel for schedule(dynamic, 128) num_threads(MAX_N_THREADS)
@@ -978,6 +979,11 @@ namespace diskann {
         this->optimized_consolidate_deletes(disk_node, pq_coord_scratch, u16_scratch);
       }
       for(auto &disk_node : disk_nodes) {
+        auto nnbrs = disk_node.nnbrs;
+        auto nbrs = disk_node.nbrs;
+        for (uint32_t i = 0; i < nnbrs; i++) {
+          cnt[nbrs[i]]++;
+        }
         if(this->is_deleted(disk_node)) {
           this->free_ids.push_back(disk_node.id);
         }
@@ -995,6 +1001,17 @@ namespace diskann {
       std::cout << new_start_id << " / " << this->disk_npts << " nodes processed.\n";
       start_id = new_start_id;
     }
+    std::cout << "In degree top 10000: ";
+    std::vector<uint32_t> id(this->disk_npts);
+    iota(id.begin(), id.end(), 0);
+    sort(id.begin(), id.end(), [&id](uint32_t i, uint32_t j) { return id[i] > id[j]; });
+    sort(cnt.begin(), cnt.end(), [](uint32_t i, uint32_t j) { return i > j; });
+    _u64 sum = 0;
+    for (int i = 0; i < 10000; i++) {
+      std::cout << "(" << cnt[i] << ", " << id[i] << ") ";
+      sum += cnt[i];
+    }
+    std::cout << std::endl << "Sum: " << sum << std::endl;
     std::cout << "avg_ef: " << (double) this->avg_ef / this->disk_npts << std::endl;
     double e2e_time = ((double) delete_timer.elapsed())/(1000000.0);
     std::cout<<"Processed Deletes in " << e2e_time <<" s." << std::endl;
@@ -1720,7 +1737,7 @@ namespace diskann {
 
 		MallocExtension::instance()->ReleaseFreeMemory();
 
-	    	this->output_writer.open(tmp_file, std::ios::out | std::ios::binary);
+	  this->output_writer.open(tmp_file, std::ios::out | std::ios::binary);
     assert(this->output_writer.is_open());
 
     // BEGIN -- PQ data on disk not consistent, not in right order

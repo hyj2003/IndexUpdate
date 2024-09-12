@@ -72,16 +72,16 @@ int search_disk_index(int argc, char** argv) {
 
   tsl::robin_set<uint32_t> inactive_tags;
 
-  // if (file_exists(disk_index_tag_file)) {
-  //   for (uint32_t i = 0; i < 1000000; i++)
-  //     inactive_tags.insert(i);
-  // }
+  if (file_exists(disk_index_tag_file)) {
+    for (uint32_t i = 0; i < 1000000; i++)
+      inactive_tags.insert(i);
+  }
   uint32_t* tag_data;
   size_t    tag_num, tag_dim;
-  // diskann::load_bin<uint32_t>(disk_index_tag_file, tag_data, tag_num, tag_dim);
-  // for (size_t i = 0; i < tag_num; i++)
-  //   inactive_tags.erase(tag_data[i]);
-  // delete[] tag_data;
+  diskann::load_bin<uint32_t>(disk_index_tag_file, tag_data, tag_num, tag_dim);
+  for (size_t i = 0; i < tag_num; i++)
+    inactive_tags.erase(tag_data[i]);
+  delete[] tag_data;
   // /*
   //       std::ifstream tag_reader(disk_index_tag_file);
   //       uint32_t      cur_i = 0;
@@ -117,10 +117,10 @@ int search_disk_index(int argc, char** argv) {
   diskann::load_aligned_bin<T>(query_bin, query, query_num, query_dim,
                                query_aligned_dim);
   if (file_exists(truthset_bin)) {
-    //    diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
-    //                           &gt_tags);
     diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
-                           &gt_tags_tmp);
+                              &gt_tags);
+    // diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
+    //                        &gt_tags_tmp);
     if (gt_num != query_num) {
       std::cout << "Error. Mismatch in number of queries and ground truth data"
                 << std::endl;
@@ -143,7 +143,7 @@ int search_disk_index(int argc, char** argv) {
   std::unique_ptr<diskann::PQFlashIndex<T>> _pFlashIndex(
       new diskann::PQFlashIndex<T>(reader));
   int res = _pFlashIndex->load(num_threads, pq_prefix.c_str(),
-                               disk_index_file.c_str(), false);
+                               disk_index_file.c_str(), true);
   if (res != 0) {
     return res;
   }
@@ -224,7 +224,7 @@ int search_disk_index(int argc, char** argv) {
   uint32_t optimized_beamwidth = 2;
 
   //  query_num = 1;
-
+  for (int cas = 0; cas <= 5; cas++) {
   for (uint32_t test_id = 0; test_id < Lvec.size(); test_id++) {
     _u64 L = Lvec[test_id];
 
@@ -246,7 +246,8 @@ int search_disk_index(int argc, char** argv) {
     diskann::QueryStats* stats = new diskann::QueryStats[query_num];
 
     std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
-    auto                  s = std::chrono::high_resolution_clock::now();
+    diskann::Timer timer;
+    // auto                  s = std::chrono::high_resolution_clock::now();
 #pragma omp               parallel for schedule(dynamic, 1)  // num_threads(1)
     for (_s64 i = 0; i < (int64_t) query_num; i++) {
       _pFlashIndex->cached_beam_search(
@@ -256,9 +257,10 @@ int search_disk_index(int argc, char** argv) {
           optimized_beamwidth, stats + i, nullptr,
           query_result_tags[test_id].data() + (i * recall_at));
     }
-    auto                          e = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = e - s;
-    float qps = (float) ((1.0 * query_num) / (1.0 * diff.count()));
+    // auto                          e = std::chrono::high_resolution_clock::now();
+    // std::chrono::duration<double> diff = e - s;
+    float diff = (float)timer.elapsed() / 1000 / 1000;
+    float qps = (float) (1.0 * query_num) / diff;
 
     diskann::convert_types<uint64_t, uint32_t>(query_result_ids_64.data(),
                                                query_result_ids[test_id].data(),
@@ -307,7 +309,7 @@ int search_disk_index(int argc, char** argv) {
     } else
       std::cout << std::endl;
   }
-
+  }
   std::cout << "Done searching. Now saving results " << std::endl;
   _u64 test_id = 0;
   for (auto L : Lvec) {

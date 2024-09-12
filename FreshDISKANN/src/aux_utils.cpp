@@ -91,10 +91,16 @@ namespace diskann {
         }
         cur_counter++;
       }
+      res.insert(res_vec, res_vec + recall_at);
       if (active_points_count < recall_at && !printed) {
         std::cout << "Warning: Couldn't find enough closest neighbors from "
                      "truthset. will result in under-reported value of recall."
                   << std::endl;
+        std::cout << active_points_count << std::endl;
+        // for (auto id : gt) {
+        //   std::cout << id << " ";
+        // }
+        // std::cout << std::endl;
         printed = true;
       }
       if (gs_dist != nullptr) {
@@ -119,7 +125,6 @@ namespace diskann {
                  std::cout<<std::endl;
       */
       // gt.insert(gt_vec, gt_vec + tie_breaker);
-      res.insert(res_vec, res_vec + recall_at);
       unsigned cur_recall = 0;
       for (auto &v : res) {
         if (gt.find(v) != gt.end() && inactive_locations.find(v) == inactive_locations.end()) {
@@ -127,7 +132,7 @@ namespace diskann {
         }
       }
       total_recall += cur_recall;
-      total_active += recall_at;
+      total_active += active_points_count;
     }
     return total_recall / total_active * recall_at;
   }

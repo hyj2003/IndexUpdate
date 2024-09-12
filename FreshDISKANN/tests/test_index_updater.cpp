@@ -1,4 +1,4 @@
-#include "v2/index_merger.h"
+#include "v2/index_updater.h"
 #include "v2/merge_insert.h"
 
 #include <mutex>
@@ -10,6 +10,7 @@
 #include <timer.h>
 #include <iomanip>
 #include <atomic>
+#include <iostream>
 
 #include "aux_utils.h"
 #include "mem_aligned_file_reader.h"
@@ -37,9 +38,9 @@ uint32_t              medoid_id = std::numeric_limits<uint32_t>::max();
 std::atomic_bool      _insertions_done(true);
 std::atomic_bool      _del_done(true);
 std::vector<uint32_t> Lvec;
+
 std::future<void>     delete_future;
 std::future<void>     insert_future;
-std::future<void>     merge_future;
 std::mutex            active_mux;
 tsl::robin_set<uint32_t> inactive_tags;
 
@@ -49,74 +50,74 @@ void seed_iter(tsl::robin_set<uint32_t> &active_set,
                const std::string &   inserted_points_file,
                const std::string &   inserted_tags_file,
                tsl::robin_set<TagT> &deleted_tags) {
-  const uint32_t insert_count = params[std::string("insert_count")];
-  const uint32_t delete_count = params[std::string("delete_count")];
-  const uint32_t ndims = params[std::string("ndims")];
-  std::cout << "ITER: start = " << active_set.size() << ", "
-            << inactive_set.size() << "\n";
+//   const uint32_t insert_count = params[std::string("insert_count")];
+//   const uint32_t delete_count = params[std::string("delete_count")];
+//   const uint32_t ndims = params[std::string("ndims")];
+//   std::cout << "ITER: start = " << active_set.size() << ", "
+//             << inactive_set.size() << "\n";
 
-  // pick `delete_count` tags
-  std::vector<uint32_t> active_vec(active_set.begin(), active_set.end());
-  std::shuffle(active_vec.begin(), active_vec.end(), rng);
-  std::vector<uint32_t> delete_vec;
-  if (active_vec.size() < delete_count)
-    delete_vec.insert(delete_vec.end(), active_vec.begin(), active_vec.end());
-  else
-    delete_vec.insert(delete_vec.end(), active_vec.begin(),
-                      active_vec.begin() + delete_count);
-  for (auto iter : delete_vec)
-    deleted_tags.insert(iter);
-  active_set.clear();
-  active_set.insert(active_vec.begin() + delete_vec.size(), active_vec.end());
-  // std::cout << "ITER: DELETE - " << delete_vec.size() << " IDs\n";
-  // pick `insert_count` tags
-  std::vector<uint32_t> inactive_vec(inactive_set.begin(), inactive_set.end());
-  std::shuffle(inactive_vec.begin(), inactive_vec.end(), rng);
-  std::vector<uint32_t> insert_vec;
-  if (inactive_vec.size() < insert_count)
-    insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
-                      inactive_vec.end());
-  else
-    insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
-                      inactive_vec.begin() + insert_count);
-  inactive_set.clear();
+//   // pick `delete_count` tags
+//   std::vector<uint32_t> active_vec(active_set.begin(), active_set.end());
+//   std::shuffle(active_vec.begin(), active_vec.end(), rng);
+//   std::vector<uint32_t> delete_vec;
+//   if (active_vec.size() < delete_count)
+//     delete_vec.insert(delete_vec.end(), active_vec.begin(), active_vec.end());
+//   else
+//     delete_vec.insert(delete_vec.end(), active_vec.begin(),
+//                       active_vec.begin() + delete_count);
+//   for (auto iter : delete_vec)
+//     deleted_tags.insert(iter);
+//   active_set.clear();
+//   active_set.insert(active_vec.begin() + delete_vec.size(), active_vec.end());
+//   // std::cout << "ITER: DELETE - " << delete_vec.size() << " IDs\n";
+//   // pick `insert_count` tags
+//   std::vector<uint32_t> inactive_vec(inactive_set.begin(), inactive_set.end());
+//   std::shuffle(inactive_vec.begin(), inactive_vec.end(), rng);
+//   std::vector<uint32_t> insert_vec;
+//   if (inactive_vec.size() < insert_count)
+//     insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
+//                       inactive_vec.end());
+//   else
+//     insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
+//                       inactive_vec.begin() + insert_count);
+//   inactive_set.clear();
 
-  // std::cout << "ITER: INSERT - " << insert_vec.size() << " IDs in "
-  //           << inserted_tags_file << "\n";
-  // inactive_set.insert(inactive_vec.begin() + insert_vec.size(),
-  //                     inactive_vec.end());
-  inactive_set.insert(inactive_vec.begin(),
-                      inactive_vec.end());
-  std::sort(insert_vec.begin(), insert_vec.end());
-  TagT *tag_data = new TagT[insert_vec.size()];
-  for (size_t i = 0; i < insert_vec.size(); i++)
-    tag_data[i] = insert_vec[i];
-  diskann::save_bin<TagT>(inserted_tags_file, tag_data, insert_vec.size(), 1);
-  delete[] tag_data;
+//   // std::cout << "ITER: INSERT - " << insert_vec.size() << " IDs in "
+//   //           << inserted_tags_file << "\n";
+//   // inactive_set.insert(inactive_vec.begin() + insert_vec.size(),
+//   //                     inactive_vec.end());
+//   inactive_set.insert(inactive_vec.begin(),
+//                       inactive_vec.end());
+//   std::sort(insert_vec.begin(), insert_vec.end());
+//   TagT *tag_data = new TagT[insert_vec.size()];
+//   for (size_t i = 0; i < insert_vec.size(); i++)
+//     tag_data[i] = insert_vec[i];
+//   diskann::save_bin<TagT>(inserted_tags_file, tag_data, insert_vec.size(), 1);
+//   delete[] tag_data;
 
-  std::ofstream inserted_points_writer(inserted_points_file, std::ios::binary);
-  T *new_pts = new T[(uint32_t) insert_vec.size() * (uint32_t) ndims];
-  for (uint64_t idx = 0; idx < insert_vec.size(); idx++) {
-    uint32_t actual_idx = insert_vec[idx];
-    T *      src_ptr = all_points + actual_idx * (uint64_t) ndims;
-    T *      dest_ptr = new_pts + idx * (uint64_t) ndims;
-    std::memcpy(dest_ptr, src_ptr, ndims * sizeof(T));
-  }
-  uint32_t npts_u32 = insert_vec.size(), ndims_u32 = ndims;
-  inserted_points_writer.write((char *) &npts_u32, sizeof(uint32_t));
-  inserted_points_writer.write((char *) &ndims_u32, sizeof(uint32_t));
-  inserted_points_writer.write(
-      (char *) new_pts,
-      (uint64_t) insert_vec.size() * (uint64_t) ndims * sizeof(T));
-  inserted_points_writer.close();
-  delete[] new_pts;
+//   std::ofstream inserted_points_writer(inserted_points_file, std::ios::binary);
+//   T *new_pts = new T[(uint32_t) insert_vec.size() * (uint32_t) ndims];
+//   for (uint64_t idx = 0; idx < insert_vec.size(); idx++) {
+//     uint32_t actual_idx = insert_vec[idx];
+//     T *      src_ptr = all_points + actual_idx * (uint64_t) ndims;
+//     T *      dest_ptr = new_pts + idx * (uint64_t) ndims;
+//     std::memcpy(dest_ptr, src_ptr, ndims * sizeof(T));
+//   }
+//   uint32_t npts_u32 = insert_vec.size(), ndims_u32 = ndims;
+//   inserted_points_writer.write((char *) &npts_u32, sizeof(uint32_t));
+//   inserted_points_writer.write((char *) &ndims_u32, sizeof(uint32_t));
+//   inserted_points_writer.write(
+//       (char *) new_pts,
+//       (uint64_t) insert_vec.size() * (uint64_t) ndims * sizeof(T));
+//   inserted_points_writer.close();
+//   delete[] new_pts;
 
-  // balance tags
-  // inactive_set.insert(delete_vec.begin(), delete_vec.end());
-  active_set.insert(insert_vec.begin(), insert_vec.end());
-  std::cout << "ITER: end = " << active_set.size() << ", "
-            << inactive_set.size() << "\n";
-  malloc_stats();
+//   // balance tags
+//   // inactive_set.insert(delete_vec.begin(), delete_vec.end());
+//   active_set.insert(insert_vec.begin(), insert_vec.end());
+//   std::cout << "ITER: end = " << active_set.size() << ", "
+//             << inactive_set.size() << "\n";
+//   malloc_stats();
 }
 
 float compute_active_recall(const uint32_t *result_tags,
@@ -141,92 +142,10 @@ float compute_active_recall(const uint32_t *result_tags,
   return ((float) match / (float) active_gs.size()) * 100;
 }
 
-template<typename T, typename TagT = uint32_t>
-void search_disk_index(const std::string &             index_prefix_path,
-                       const tsl::robin_set<uint32_t> &inactive_tags,
-                       const std::string &             query_path,
-                       const std::string &             gs_path) {
-  std::string pq_prefix = index_prefix_path + "_pq";
-  std::string disk_index_file = index_prefix_path + "_disk.index";
-  std::string warmup_query_file = index_prefix_path + "_sample_data.bin";
-  uint32_t    beamwidth = params[std::string("beam_width")];
-  uint32_t    num_threads = 60;
-  std::string query_bin = query_path;
-  std::string truthset_bin = gs_path;
-  uint64_t    recall_at = params[std::string("recall_k")];
-  uint64_t    search_L = ::Lvec[0];
-  // hold data
-  T *       query = nullptr;
-  unsigned *gt_ids = nullptr;
-  uint32_t *gt_tags = nullptr;
-  float *   gt_dists = nullptr;
-  size_t    query_num, query_dim, query_aligned_dim, gt_num, gt_dim;
-
-  // load query + truthset
-  diskann::load_aligned_bin<T>(query_bin, query, query_num, query_dim,
-                               query_aligned_dim);
-  diskann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim,
-                         &gt_tags);
-  if (gt_num != query_num) {
-    std::cout << "Error. Mismatch in number of queries and ground truth data"
-              << std::endl;
-  }
-
-  // load PQ Flash Index
-  std::shared_ptr<AlignedFileReader> reader(new LinuxAlignedFileReader());
-  std::unique_ptr<diskann::PQFlashIndex<T, uint32_t>> _pFlashIndex(
-      new diskann::PQFlashIndex<T, uint32_t>(reader));
-  int res = _pFlashIndex->load(num_threads, pq_prefix.c_str(),
-                               disk_index_file.c_str(), true);
-  if (res != 0) {
-    std::cerr << "Failed to load index.\n";
-    exit(-1);
-  }
-
-  // prep for search
-  std::vector<uint32_t> query_result_ids;
-  std::vector<uint32_t> query_result_tags;
-  std::vector<float>    query_result_dists;
-  query_result_ids.resize(recall_at * query_num);
-  query_result_dists.resize(recall_at * query_num);
-  query_result_tags.resize(recall_at * query_num);
-  diskann::QueryStats * stats = new diskann::QueryStats[query_num];
-  std::vector<uint64_t> query_result_ids_64(recall_at * query_num);
-#pragma omp             parallel for schedule(dynamic, 1)  // num_threads(1)
-  for (_s64 i = 0; i < (int64_t) query_num; i++) {
-    _pFlashIndex->cached_beam_search(
-        query + (i * query_aligned_dim), recall_at, search_L,
-        query_result_ids_64.data() + (i * recall_at),
-        query_result_dists.data() + (i * recall_at), beamwidth, stats + i,
-        nullptr, query_result_tags.data() + (i * recall_at));
-  }
-
-  // compute mean recall, IOs
-  float mean_recall = 0.0f;
-  for (uint32_t i = 0; i < query_num; i++) {
-    auto *result_tags = query_result_tags.data() + (i * recall_at);
-    auto *gs_tags = gt_tags + (i * gt_dim);
-    float query_recall = compute_active_recall(result_tags, recall_at, gs_tags,
-                                               gt_dim, inactive_tags);
-    mean_recall += query_recall;
-  }
-  mean_recall /= query_num;
-  float mean_ios = (float) diskann::get_mean_stats(
-      stats, query_num,
-      [](const diskann::QueryStats &stats) { return stats.n_ios; });
-  std::cout << "PQFlashIndex :: recall-" << recall_at << "@" << recall_at
-            << ": " << mean_recall << ", mean IOs: " << mean_ios << "\n";
-  diskann::aligned_free(query);
-  delete[] stats;
-  delete[] gt_ids;
-  delete[] gt_dists;
-  delete[] gt_tags;
-}
-
 std::map<std::string, std::vector<float>> sta_vecs;
 auto time_elapsed_begin = std::chrono::high_resolution_clock::now();
 template<typename T, typename TagT = uint32_t>
-void search_kernel(diskann::MergeInsert<T> &       merge_insert,
+void search_kernel(diskann::IndexUpdater<T> &index_updater,
                    const tsl::robin_set<uint32_t> &inactive_tags,
                    const std::string &query_path, const std::string &gs_path,
                    bool print_stats = false) {
@@ -300,13 +219,17 @@ void search_kernel(diskann::MergeInsert<T> &       merge_insert,
       snapshot_inactive = inactive_tags;
     }
       s = std::chrono::high_resolution_clock::now();
-#pragma omp              parallel for num_threads(3)
+#pragma omp              parallel for num_threads(1)
       for (_s64 i = 0; i < (int64_t) query_num; i++) {
         auto qs = std::chrono::high_resolution_clock::now();
-        merge_insert.search_sync(query + (i * query_aligned_dim), recall_at, L,
-                                (query_result_tags.data() + (i * recall_at)),
-                                query_result_dists.data() + (i * recall_at),
-                                stats + i);
+        index_updater.search(query + (i * query_aligned_dim), recall_at, L,
+                            (query_result_tags.data() + (i * recall_at)),
+                             query_result_dists.data() + (i * recall_at),
+                             stats + i);
+        for (uint64_t j = 0; j < recall_at; j++) {
+          std::cout << query_result_tags[i + j] << " ";
+        }
+        std::cout << '\n';
         auto qe = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = qe - qs;
         latency_stats[i] = diff.count() * 1000;
@@ -359,131 +282,110 @@ void search_kernel(diskann::MergeInsert<T> &       merge_insert,
 }
 
 template<typename T, typename TagT = uint32_t>
-void insertion_kernel(diskann::MergeInsert<T> &merge_insert,
+void insertion_kernel(diskann::IndexUpdater<T, TagT> &index_updater,
                       std::string mem_pts_file, std::string mem_tags_file) {
-  if (::_insertions_done.load()) {
-    std::cout << "Insertions_done is true at the beginning of insertion kernel"
-              << std::endl;
-    exit(-1);
-  }
-  std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-  T *    data_insert = nullptr;
-  size_t npts, ndim, aligned_dim;
-  diskann::load_aligned_bin<T>(mem_pts_file, data_insert, npts, ndim,
-                               aligned_dim);
-  size_t tag_num, tag_dim;
-  TagT * tag_data;
-  diskann::load_bin<TagT>(mem_tags_file, tag_data, tag_num, tag_dim);
-  if (tag_num != npts) {
-    std::cout << "In insertion_kernel(), number of tags loaded is not equal to "
-                 "number of points loaded. Exiting....."
-              << std::endl;
-    exit(-1);
-  }
-  size_t              i;
-  std::vector<double> insert_latencies(npts, 0);
-  diskann::Timer      timer;
-// #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
-//   for (i = 0; i < npts; i++) {
-//     int            percentile = 0;
-//     diskann::Timer insert_timer;
-//     if (merge_insert.insert(data_insert + i * aligned_dim, tag_data[i],
-//                             percentile) == 0) {
-//       insert_latencies[i] = ((double) insert_timer.elapsed());
-//     } else {
-//       std::cout << "Point " << i << "could not be inserted." << std::endl;
-//     }
-//     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-//     if ((i % 1000000 == 0) && (i > 0))
-//       std::cout << "Inserted another 1M points" << std::endl;
+//   if (::_insertions_done.load()) {
+//     std::cout << "Insertions_done is true at the beginning of insertion kernel"
+//               << std::endl;
+//     exit(-1);
 //   }
+//   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+//   T *    data_insert = nullptr;
+//   size_t npts, ndim, aligned_dim;
+//   diskann::load_aligned_bin<T>(mem_pts_file, data_insert, npts, ndim,
+//                                aligned_dim);
+//   size_t tag_num, tag_dim;
+//   TagT * tag_data;
+//   diskann::load_bin<TagT>(mem_tags_file, tag_data, tag_num, tag_dim);
+//   if (tag_num != npts) {
+//     std::cout << "In insertion_kernel(), number of tags loaded is not equal to "
+//                  "number of points loaded. Exiting....."
+//               << std::endl;
+//     exit(-1);
+//   }
+//   size_t              i;
+//   std::vector<double> insert_latencies(npts, 0);
+//   diskann::Timer      timer;
+// // #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
+// //   for (i = 0; i < npts; i++) {
+// //     int            percentile = 0;
+// //     diskann::Timer insert_timer;
+// //     if (merge_insert.insert(data_insert + i * aligned_dim, tag_data[i],
+// //                             percentile) == 0) {
+// //       insert_latencies[i] = ((double) insert_timer.elapsed());
+// //     } else {
+// //       std::cout << "Point " << i << "could not be inserted." << std::endl;
+// //     }
+// //     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+// //     if ((i % 1000000 == 0) && (i > 0))
+// //       std::cout << "Inserted another 1M points" << std::endl;
+// //   }
 
-  for (i = 0; i < npts; i += NUM_INSERT_THREADS) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    std::lock_guard guard(::active_mux);
-    size_t lim = std::min(size_t(NUM_INSERT_THREADS), npts - i);
-#pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
-    for (size_t j = 0; j < lim; j++) {
-      int            percentile = 0;
-      diskann::Timer insert_timer;
-      if (merge_insert.insert(data_insert + (i + j) * aligned_dim, tag_data[i + j],
-                              percentile) == 0) {
-        insert_latencies[i + j] = ((double) insert_timer.elapsed());
-      } else {
-        std::cout << "Point " << i + j << "could not be inserted." << std::endl;
-      }
-      if (((i + j) % 1000000 == 0) && (i + j > 0))
-        std::cout << "Inserted another 1M points" << std::endl;
-    }
-    for (int j = 0; j < NUM_INSERT_THREADS && i + j < npts; j++) {
-      ::inactive_tags.erase(tag_data[i + j]);
-    }
-  }
-  std::sort(insert_latencies.begin(), insert_latencies.end());
-  std::cout << "Mem index insertion time : " << timer.elapsed() / 1000 << " ms"
-            << std::endl
-            << "10th percentile insertion time : "
-            << insert_latencies[0.10 * npts] << " microsec" << std::endl
-            << "50th percentile insertion time : "
-            << insert_latencies[0.5 * npts] << " microsec"
-            << "90th percentile insertion time : "
-            << insert_latencies[0.90 * npts] << " microsec" << std::endl;
+//   for (i = 0; i < npts; i += NUM_INSERT_THREADS) {
+//     std::this_thread::sleep_for(std::chrono::milliseconds(25));
+//     std::lock_guard guard(::active_mux);
+//     size_t lim = std::min(size_t(NUM_INSERT_THREADS), npts - i);
+// #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
+//     for (size_t j = 0; j < lim; j++) {
+//       diskann::Timer insert_timer;
+//       if (index_updater.insert(data_insert + (i + j) * aligned_dim, tag_data[i + j]) == 0) {
+//         insert_latencies[i + j] = ((double) insert_timer.elapsed());
+//       } else {
+//         std::cout << "Point " << i + j << "could not be inserted." << std::endl;
+//       }
+//       if (((i + j) % 1000000 == 0) && (i + j > 0))
+//         std::cout << "Inserted another 1M points" << std::endl;
+//     }
+//     for (int j = 0; j < NUM_INSERT_THREADS && i + j < npts; j++) {
+//       ::inactive_tags.erase(tag_data[i + j]);
+//     }
+//   }
+//   std::sort(insert_latencies.begin(), insert_latencies.end());
+//   std::cout << "Mem index insertion time : " << timer.elapsed() / 1000 << " ms"
+//             << std::endl
+//             << "10th percentile insertion time : "
+//             << insert_latencies[0.10 * npts] << " microsec" << std::endl
+//             << "50th percentile insertion time : "
+//             << insert_latencies[0.5 * npts] << " microsec"
+//             << "90th percentile insertion time : "
+//             << insert_latencies[0.90 * npts] << " microsec" << std::endl;
   ::_insertions_done.store(true);
-  delete[] data_insert;
-  delete[] tag_data;
+//   delete[] data_insert;
+//   delete[] tag_data;
 }
 template<typename T, typename TagT = uint32_t>
-void deletion_kernel(diskann::MergeInsert<T> &merge_insert,
+void deletion_kernel(diskann::IndexUpdater<T, TagT> &index_updater,
                      tsl::robin_set<uint32_t> del_tags) {
-  if (::_del_done.load()) {
-    std::cout << "_del_done is already true" << std::endl;
-    exit(-1);
-  }
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  diskann::Timer timer;
-  for (auto iter : del_tags) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    merge_insert.lazy_delete(iter);
-    std::lock_guard guard(active_mux);
-    ::inactive_tags.insert(iter);
-  }
-  std::cout << "Deletion time : " << timer.elapsed() / 1000 << " ms"
-            << std::endl;
+//   if (::_del_done.load()) {
+//     std::cout << "_del_done is already true" << std::endl;
+//     exit(-1);
+//   }
+//   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+//   diskann::Timer timer;
+//   for (auto iter : del_tags) {
+//     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+//     index_updater.remove(iter);
+//     std::lock_guard guard(active_mux);
+//     ::inactive_tags.insert(iter);
+//   }
+//   std::cout << "Deletion time : " << timer.elapsed() / 1000 << " ms"
+//             << std::endl;
   ::_del_done.store(true);
 }
 
-template<typename T>
-void merge_kernel(diskann::MergeInsert<T> &merge_insert) {
-  while (true) {
-    merge_insert.trigger_merge();
-    if (::_insertions_done.load()) {
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-  }
-}
-
-// template<typename T>
-// void merge_kernel(diskann::MergeInsert<T> &merge_insert) {
-//   merge_insert.final_merge();
-// }
-
 template<typename T, typename TagT = uint32_t>
-void run_iter(diskann::MergeInsert<T> &merge_insert,
-              const std::string &base_prefix, const std::string &merge_prefix,
+void run_iter(diskann::IndexUpdater<T, TagT> &index_updater,
+              const std::string &base_prefix, 
               const std::string &       mem_prefix,
               tsl::robin_set<uint32_t> &active_set,
               tsl::robin_set<uint32_t> &inactive_set,
               const std::string &query_file, const std::string &gs_file,
               T *data, diskann::Distance<T> *dist_cmp) {
-  // files for mem-DiskANN
   std::string mem_pts_file = mem_prefix + ".data_orig";
   std::string mem_tags_file = mem_prefix + ".tags_orig";
   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-  ::merge_future =
-      std::async(std::launch::async, merge_kernel<T>, std::ref(merge_insert));
   while (!(::_insertions_done.load() && ::_del_done.load())) {
-    search_kernel<T>(merge_insert, inactive_set, query_file, gs_file);
+    search_kernel<T>(index_updater, inactive_set, query_file, gs_file);
     std::this_thread::sleep_for(std::chrono::milliseconds(5000));
   }
   if (::_insertions_done.load() && ::_del_done.load()) {
@@ -491,7 +393,7 @@ void run_iter(diskann::MergeInsert<T> &merge_insert,
     ::_del_done.store(false);
 
     // std::cout << "Searching all indices" << std::endl;
-    search_kernel<T>(merge_insert, inactive_set, query_file, gs_file, true);
+    search_kernel<T>(index_updater, inactive_set, query_file, gs_file, true);
       std::cout << "Inactive set size: " << inactive_set.size() << std::endl;
 
     // std::cout << "ITER: Seeding iteration"
@@ -501,22 +403,17 @@ void run_iter(diskann::MergeInsert<T> &merge_insert,
     seed_iter<T, TagT>(active_set, inactive_set, data, mem_pts_file,
                        mem_tags_file, deleted_tags);
     ::delete_future = std::async(std::launch::async, deletion_kernel<T, TagT>,
-                                 std::ref(merge_insert), deleted_tags);
+                                 std::ref(index_updater), deleted_tags);
     ::insert_future =
         std::async(std::launch::async, insertion_kernel<T>,
-                   std::ref(merge_insert), mem_pts_file, mem_tags_file);
+                   std::ref(index_updater), mem_pts_file, mem_tags_file);
   }
-  std::future_status merge_status;
-
-  do {
-    merge_status = ::merge_future.wait_for(std::chrono::milliseconds(1));
-    search_kernel<T>(merge_insert, inactive_set, query_file, gs_file);
-  } while ((merge_status != std::future_status::ready));
 }
 
 template<typename T, typename TagT = uint32_t>
-void run_all_iters(std::string &base_prefix, std::string &merge_prefix,
-                   const std::string &mem_prefix, const std::string &data_file,
+void run_all_iters(std::string &base_prefix,
+                   const std::string &mem_prefix,
+                   const std::string &data_file,
                    const std::string &active_tags_file,
                    const std::string &query_file, const std::string &gs_file,
                    diskann::Distance<T> *dist_cmp) {
@@ -532,6 +429,7 @@ void run_all_iters(std::string &base_prefix, std::string &merge_prefix,
   tsl::robin_set<uint32_t> active_tags;
   TagT *                   tag_data;
   size_t                   tag_num, tag_dim;
+  std::cout << active_tags_file << std::endl;
   diskann::load_bin<TagT>(active_tags_file, tag_data, tag_num, tag_dim);
   size_t tags_loaded = 0;
   size_t del_tags_found = 0;
@@ -573,27 +471,28 @@ void run_all_iters(std::string &base_prefix, std::string &merge_prefix,
   // remove medoid from active_set
   active_tags.erase(::medoid_id);
 
-  diskann::Parameters paras;
-  paras.Set<unsigned>("L_mem", params[std::string("mem_l_index")]);
-  paras.Set<unsigned>("R_mem", 32);
-  paras.Set<float>("alpha_mem", ::mem_alpha);
-  paras.Set<unsigned>("L_disk", params[std::string("merge_l_index")]);
-  paras.Set<unsigned>("R_disk", params[std::string("range")]);
-  paras.Set<float>("alpha_disk", ::merge_alpha);
-  paras.Set<unsigned>("C", params[std::string("merge_maxc")]);
-  paras.Set<unsigned>("beamwidth", params[std::string("beam_width")]);
-  paras.Set<unsigned>("nodes_to_cache",
-                      params[std::string("disk_search_node_cache_count")]);
-  paras.Set<unsigned>("num_search_threads",
-                      params[std::string("disk_search_nthreads")]);
+//   diskann::Parameters paras;
+//   paras.Set<unsigned>("L_mem", params[std::string("mem_l_index")]);
+//   paras.Set<unsigned>("R_mem", 32);
+//   paras.Set<float>("alpha_mem", ::mem_alpha);
+//   paras.Set<unsigned>("L_disk", params[std::string("merge_l_index")]);
+//   paras.Set<unsigned>("R_disk", params[std::string("range")]);
+//   paras.Set<float>("alpha_disk", ::merge_alpha);
+//   paras.Set<unsigned>("C", params[std::string("merge_maxc")]);
+//   paras.Set<unsigned>("beamwidth", params[std::string("beam_width")]);
+//   paras.Set<unsigned>("nodes_to_cache",
+//                       params[std::string("disk_search_node_cache_count")]);
+//   paras.Set<unsigned>("num_search_threads",
+//                       params[std::string("disk_search_nthreads")]);
 
-  diskann::MergeInsert<T, TagT> merge_insert(
-      paras, 200000, ndims, mem_prefix, base_prefix, merge_prefix, dist_cmp);
-  for (size_t i = 0; i < n_iters; i++) {
+  diskann::IndexUpdater<T, TagT> index_updater(
+      base_prefix.c_str(), dist_cmp, 4, 64, 75, 1.2, 750);
+  index_updater.UpdateThreadSetup(5);
+  for (int i = 0; i < n_iters; i++) {
     std::cout << "ITER : " << i << std::endl;
     if (i == 0) 
       time_elapsed_begin = std::chrono::high_resolution_clock::now();
-    run_iter<T>(merge_insert, base_prefix, merge_prefix, mem_prefix,
+    run_iter<T>(index_updater, base_prefix, mem_prefix,
                 active_tags, inactive_tags, query_file, gs_file, data.get(),
                 dist_cmp);
     std::cout << "ITER " << i << " has been done.\n";
@@ -608,29 +507,24 @@ void run_all_iters(std::string &base_prefix, std::string &merge_prefix,
   }
   std::cout << "Done running all iterations, now merging any leftover points."
             << std::endl;
-  std::future_status merge_status, insert_status, delete_status;
+  std::future_status insert_status, delete_status;
   do {
-    merge_status = ::merge_future.wait_for(std::chrono::milliseconds(1));
     insert_status = ::insert_future.wait_for(std::chrono::milliseconds(1));
-    merge_status = ::delete_future.wait_for(std::chrono::milliseconds(1));
+    delete_status = ::delete_future.wait_for(std::chrono::milliseconds(1));
 
-    search_kernel<T>(merge_insert, inactive_tags, query_file, gs_file, false);
-  } while ((merge_status != std::future_status::ready) ||
-           (insert_status != std::future_status::ready) ||
+    search_kernel<T>(index_updater, inactive_tags, query_file, gs_file, false);
+  } while ((insert_status != std::future_status::ready) ||
            (delete_status != std::future_status::ready));
-  merge_kernel(merge_insert);
-  search_kernel<T>(merge_insert, inactive_tags, query_file, gs_file, true);
+  search_kernel<T>(index_updater, inactive_tags, query_file, gs_file, true);
 }
-// 每轮开始时 recall 会降低较多，为什么？
-// Solved.
 int main(int argc, char **argv) {
-  if (argc < 19) {
+  if (argc < 17) {
     std::cout << "Correct usage: " << argv[0]
               << " <type[int8/uint8/float]> <WORKING_FOLDER> <base_prefix> "
-                 "<merge_prefix> <mem_prefix> <L_mem> <alpha_mem> <L_disk> "
+                 "<mem_prefix> <L_disk> "
                  "<alpha_disk> "
-              << " <full_data_bin> <query_bin> <truthset>"
-              << " <n_iters> <total_insert_count> <total_delete_count> <range> "
+              << "<full_data_bin> <query_bin> <truthset> "
+              << "<n_iters> <total_insert_count> <total_delete_count> <background_threads_num> <range> "
                  "<recall_k> "
                  "<search_L1> <search_L2> <search_L3> ...."
               << "\n WARNING: Other parameters set inside CPP source."
@@ -643,10 +537,7 @@ int main(int argc, char **argv) {
   std::string index_type = argv[arg_no++];
   TMP_FOLDER = argv[arg_no++];
   std::string base_prefix(argv[arg_no++]);
-  std::string merge_prefix(argv[arg_no++]);
   std::string mem_prefix(argv[arg_no++]);
-  unsigned    L_mem = (unsigned) atoi(argv[arg_no++]);
-  float       alpha_mem = (float) atof(argv[arg_no++]);
   unsigned    L_disk = (unsigned) atoi(argv[arg_no++]);
   float       alpha_disk = (float) atof(argv[arg_no++]);
   std::string data_bin(argv[arg_no++]);
@@ -655,6 +546,7 @@ int main(int argc, char **argv) {
   int         n_iters = atoi(argv[arg_no++]);
   uint32_t    insert_count = (uint32_t) atoi(argv[arg_no++]);
   uint32_t    delete_count = (uint32_t) atoi(argv[arg_no++]);
+  uint32_t    background_threads_num = (uint32_t) atoi(argv[arg_no++]);
   uint32_t    range = (uint32_t) atoi(argv[arg_no++]);
   uint32_t    recall_k = (uint32_t) atoi(argv[arg_no++]);
 
@@ -667,33 +559,29 @@ int main(int argc, char **argv) {
   params[std::string("n_iters")] = n_iters;
   params[std::string("insert_count")] = insert_count;
   params[std::string("delete_count")] = delete_count;
+  params[std::string("background_threads_num")] = background_threads_num;
   params[std::string("range")] = range;
   params[std::string("recall_k")] = recall_k;
-
+  params[std::string("L_disk")] = L_disk;
+  params[std::string("alpha_disk")] = alpha_disk;
   // hard-coded params
-  params[std::string("disk_search_node_cache_count")] = 100;
-  params[std::string("disk_search_nthreads")] = 16;
+//   params[std::string("disk_search_node_cache_count")] = 100;
+//   params[std::string("disk_search_nthreads")] = 16;
   params[std::string("beam_width")] = 4;
-  params[std::string("mem_l_index")] = L_mem;
-  mem_alpha = alpha_mem;
-  merge_alpha = alpha_disk;
-  params[std::string("mem_nthreads")] = 32;
-  params[std::string("merge_maxc")] = (uint32_t)(range * 2.5);
-  params[std::string("merge_l_index")] = L_disk;
 
   if (index_type == std::string("float")) {
     diskann::DistanceL2 dist_cmp;
-    run_all_iters<float>(base_prefix, merge_prefix, mem_prefix, data_bin,
+    run_all_iters<float>(base_prefix, mem_prefix, data_bin,
                          base_prefix + "_disk.index.tags", query_bin, gt_bin,
                          &dist_cmp);
   } else if (index_type == std::string("uint8")) {
     diskann::DistanceL2UInt8 dist_cmp;
-    run_all_iters<uint8_t>(base_prefix, merge_prefix, mem_prefix, data_bin,
+    run_all_iters<uint8_t>(base_prefix, mem_prefix, data_bin,
                            base_prefix + "_disk.index.tags", query_bin, gt_bin,
                            &dist_cmp);
   } else if (index_type == std::string("int8")) {
     diskann::DistanceL2Int8 dist_cmp;
-    run_all_iters<int8_t>(base_prefix, merge_prefix, mem_prefix, data_bin,
+    run_all_iters<int8_t>(base_prefix, mem_prefix, data_bin,
                           base_prefix + "_disk.index.tags", query_bin, gt_bin,
                           &dist_cmp);
   } else {
