@@ -44,8 +44,7 @@ namespace diskann {
     void ProcessPage(_u64 sector_id, UpdateThreadData<T> *upd);
     void PushVisitedPage(_u64 sector_id, char *sector_buf);
     void ProcessUpdateRequests(bool update_flag);
-    void dump_to_disk(std::fstream     &output_writer,
-                      const std::vector<DiskNode<T>> &disk_nodes, const uint32_t start_id, 
+    void dump_to_disk(std::fstream     &output_writer, const uint32_t start_id, 
                       const char* buf, const uint32_t n_sectors) {
       assert(start_id % this->nnodes_per_sector == 0);
       uint32_t start_sector = (start_id / this->nnodes_per_sector) + 1;
@@ -90,14 +89,13 @@ namespace diskann {
     std::shared_mutex delete_cache_lock_;
     tsl::robin_map<_u32, std::pair<_u32, const _u32 *>> delete_cache_;
     const uint64_t MAX_NODE_NUMBER = uint64_t(10000005);    //
-    VisitedList del_filter_ = VisitedList(MAX_NODE_NUMBER); // May need to be modified.
+    Bitset<uint64_t> del_filter_ = Bitset(MAX_NODE_NUMBER); // May need to be modified.
     _u32 two_hops_lim;
     // Variables for insertion
     std::shared_mutex insert_edges_lock_;
     tsl::robin_map<_u32, std::vector<_u32>> insert_edges_;
-
     // Variables for pruning
-    const size_t maxc = 750, range = 64;
+    const size_t maxc = 750, range = 64, l_index = 75, beam_width = 4;
     const float alpha = 1.2;
 
     // Variables for page caching
@@ -107,6 +105,7 @@ namespace diskann {
 
     ConcurrentQueue<std::pair<_u64, UpdateThreadData<T>* >> reqs_queue_;
     ConcurrentQueue<UpdateThreadData<T>>        scratch_queue_;
+    ConcurrentQueue<std::pair<char*, char* >>   page_pairs_queue_;
     tsl::robin_set<_u64>                     page_in_process_;
     std::shared_mutex                        page_in_process_lock_;
 
@@ -121,8 +120,10 @@ namespace diskann {
     uint32_t                   max_index_num_;
     // need further implement concurrent insert/delete queue to strengthen visibility
 
-    uint8_t* update_thread_pq_scratch = nullptr;
-    uint16_t* update_thread_pq_scratch_u16 = nullptr;
+    uint8_t *update_thread_pq_scratch = nullptr;
+    uint16_t *update_thread_pq_scratch_u16 = nullptr;
+    char *update_thread_page_scratch = nullptr;
+
     uint32_t background_threads_num_;
     // std::shared_ptr<AlignedFileReader> fresh_reader = nullptr;
     // May need to be added

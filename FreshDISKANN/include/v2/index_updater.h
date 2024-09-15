@@ -51,9 +51,7 @@ namespace diskann {
         for (size_t i = 0; i < searchK; i++) {
           tags[i] = query_result_tags[i];
           distances[i] = query_result_dists[i];
-          std::cout << tags[i] << " ";
         }
-        std::cout << '\n';
       }
       void StopUpdate() {
         this->update_flag_ = false;

@@ -24,9 +24,9 @@
 
 #define RESET "\033[0m"
 #define RED "\033[31m" /*  Red  */
-#define NUM_INSERT_THREADS 2
+#define NUM_INSERT_THREADS 3
 #define NUM_DELETE_THREADS 1
-#define NUM_SEARCH_THREADS 10
+#define NUM_SEARCH_THREADS 2
 
 // random number generator
 std::random_device dev;
@@ -48,76 +48,79 @@ template<typename T, typename TagT = uint32_t>
 void seed_iter(tsl::robin_set<uint32_t> &active_set,
                tsl::robin_set<uint32_t> &inactive_set, T *all_points,
                const std::string &   inserted_points_file,
-               const std::string &   inserted_tags_file,
+               const std::string &   inserted_tags_file, // Put tags about to insert into this
                tsl::robin_set<TagT> &deleted_tags) {
-//   const uint32_t insert_count = params[std::string("insert_count")];
-//   const uint32_t delete_count = params[std::string("delete_count")];
-//   const uint32_t ndims = params[std::string("ndims")];
-//   std::cout << "ITER: start = " << active_set.size() << ", "
-//             << inactive_set.size() << "\n";
+  const uint32_t insert_count = params[std::string("insert_count")];
+  const uint32_t delete_count = params[std::string("delete_count")];
+  const uint32_t ndims = params[std::string("ndims")];
+  std::cout << "ITER: start = " << active_set.size() << ", "
+            << inactive_set.size() << "\n";
 
-//   // pick `delete_count` tags
-//   std::vector<uint32_t> active_vec(active_set.begin(), active_set.end());
-//   std::shuffle(active_vec.begin(), active_vec.end(), rng);
-//   std::vector<uint32_t> delete_vec;
-//   if (active_vec.size() < delete_count)
-//     delete_vec.insert(delete_vec.end(), active_vec.begin(), active_vec.end());
-//   else
-//     delete_vec.insert(delete_vec.end(), active_vec.begin(),
-//                       active_vec.begin() + delete_count);
-//   for (auto iter : delete_vec)
-//     deleted_tags.insert(iter);
-//   active_set.clear();
-//   active_set.insert(active_vec.begin() + delete_vec.size(), active_vec.end());
-//   // std::cout << "ITER: DELETE - " << delete_vec.size() << " IDs\n";
-//   // pick `insert_count` tags
-//   std::vector<uint32_t> inactive_vec(inactive_set.begin(), inactive_set.end());
-//   std::shuffle(inactive_vec.begin(), inactive_vec.end(), rng);
-//   std::vector<uint32_t> insert_vec;
-//   if (inactive_vec.size() < insert_count)
-//     insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
-//                       inactive_vec.end());
-//   else
-//     insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
-//                       inactive_vec.begin() + insert_count);
-//   inactive_set.clear();
+  // pick `delete_count` tags
+  std::vector<uint32_t> active_vec(active_set.begin(), active_set.end());
+  std::shuffle(active_vec.begin(), active_vec.end(), rng);
+  std::vector<uint32_t> delete_vec;
+  if (active_vec.size() < delete_count)
+    delete_vec.insert(delete_vec.end(), active_vec.begin(), active_vec.end());
+  else
+    delete_vec.insert(delete_vec.end(), active_vec.begin(),
+                      active_vec.begin() + delete_count);
+  for (auto iter : delete_vec)
+    deleted_tags.insert(iter);
+  active_set.clear();
+  active_set.insert(active_vec.begin() + delete_vec.size(), active_vec.end());
+  // std::cout << "ITER: DELETE - " << delete_vec.size() << " IDs\n";
+  // pick `insert_count` tags
+  std::vector<uint32_t> inactive_vec(inactive_set.begin(), inactive_set.end());
+  std::shuffle(inactive_vec.begin(), inactive_vec.end(), rng);
+  std::vector<uint32_t> insert_vec;
+  if (inactive_vec.size() < insert_count)
+    insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
+                      inactive_vec.end());
+  else
+    insert_vec.insert(insert_vec.end(), inactive_vec.begin(),
+                      inactive_vec.begin() + insert_count);
+  inactive_set.clear();
 
-//   // std::cout << "ITER: INSERT - " << insert_vec.size() << " IDs in "
-//   //           << inserted_tags_file << "\n";
-//   // inactive_set.insert(inactive_vec.begin() + insert_vec.size(),
-//   //                     inactive_vec.end());
-//   inactive_set.insert(inactive_vec.begin(),
-//                       inactive_vec.end());
-//   std::sort(insert_vec.begin(), insert_vec.end());
-//   TagT *tag_data = new TagT[insert_vec.size()];
-//   for (size_t i = 0; i < insert_vec.size(); i++)
-//     tag_data[i] = insert_vec[i];
-//   diskann::save_bin<TagT>(inserted_tags_file, tag_data, insert_vec.size(), 1);
-//   delete[] tag_data;
+  // std::cout << "ITER: INSERT - " << insert_vec.size() << " IDs in "
+  //           << inserted_tags_file << "\n";
+  // inactive_set.insert(inactive_vec.begin() + insert_vec.size(),
+  //                     inactive_vec.end());
+  for (auto id : insert_vec) {
+    assert(id != std::numeric_limits<uint32_t>::max());
+  }
+  inactive_set.insert(inactive_vec.begin(),
+                      inactive_vec.end());
+  std::sort(insert_vec.begin(), insert_vec.end());
+  TagT *tag_data = new TagT[insert_vec.size()];
+  for (size_t i = 0; i < insert_vec.size(); i++)
+    tag_data[i] = insert_vec[i];
+  diskann::save_bin<TagT>(inserted_tags_file, tag_data, insert_vec.size(), 1);
+  delete[] tag_data;
 
-//   std::ofstream inserted_points_writer(inserted_points_file, std::ios::binary);
-//   T *new_pts = new T[(uint32_t) insert_vec.size() * (uint32_t) ndims];
-//   for (uint64_t idx = 0; idx < insert_vec.size(); idx++) {
-//     uint32_t actual_idx = insert_vec[idx];
-//     T *      src_ptr = all_points + actual_idx * (uint64_t) ndims;
-//     T *      dest_ptr = new_pts + idx * (uint64_t) ndims;
-//     std::memcpy(dest_ptr, src_ptr, ndims * sizeof(T));
-//   }
-//   uint32_t npts_u32 = insert_vec.size(), ndims_u32 = ndims;
-//   inserted_points_writer.write((char *) &npts_u32, sizeof(uint32_t));
-//   inserted_points_writer.write((char *) &ndims_u32, sizeof(uint32_t));
-//   inserted_points_writer.write(
-//       (char *) new_pts,
-//       (uint64_t) insert_vec.size() * (uint64_t) ndims * sizeof(T));
-//   inserted_points_writer.close();
-//   delete[] new_pts;
+  std::ofstream inserted_points_writer(inserted_points_file, std::ios::binary);
+  T *new_pts = new T[(uint32_t) insert_vec.size() * (uint32_t) ndims];
+  for (uint64_t idx = 0; idx < insert_vec.size(); idx++) {
+    uint32_t actual_idx = insert_vec[idx];
+    T *      src_ptr = all_points + actual_idx * (uint64_t) ndims;
+    T *      dest_ptr = new_pts + idx * (uint64_t) ndims;
+    std::memcpy(dest_ptr, src_ptr, ndims * sizeof(T));
+  }
+  uint32_t npts_u32 = insert_vec.size(), ndims_u32 = ndims;
+  inserted_points_writer.write((char *) &npts_u32, sizeof(uint32_t));
+  inserted_points_writer.write((char *) &ndims_u32, sizeof(uint32_t));
+  inserted_points_writer.write(
+      (char *) new_pts,
+      (uint64_t) insert_vec.size() * (uint64_t) ndims * sizeof(T));
+  inserted_points_writer.close();
+  delete[] new_pts;
 
-//   // balance tags
-//   // inactive_set.insert(delete_vec.begin(), delete_vec.end());
-//   active_set.insert(insert_vec.begin(), insert_vec.end());
-//   std::cout << "ITER: end = " << active_set.size() << ", "
-//             << inactive_set.size() << "\n";
-//   malloc_stats();
+  // balance tags
+  // inactive_set.insert(delete_vec.begin(), delete_vec.end());
+  active_set.insert(insert_vec.begin(), insert_vec.end());
+  std::cout << "ITER: end = " << active_set.size() << ", "
+            << inactive_set.size() << "\n";
+  malloc_stats();
 }
 
 float compute_active_recall(const uint32_t *result_tags,
@@ -219,17 +222,13 @@ void search_kernel(diskann::IndexUpdater<T> &index_updater,
       snapshot_inactive = inactive_tags;
     }
       s = std::chrono::high_resolution_clock::now();
-#pragma omp              parallel for num_threads(1)
+#pragma omp              parallel for num_threads(NUM_SEARCH_THREADS)
       for (_s64 i = 0; i < (int64_t) query_num; i++) {
         auto qs = std::chrono::high_resolution_clock::now();
         index_updater.search(query + (i * query_aligned_dim), recall_at, L,
                             (query_result_tags.data() + (i * recall_at)),
                              query_result_dists.data() + (i * recall_at),
                              stats + i);
-        for (uint64_t j = 0; j < recall_at; j++) {
-          std::cout << query_result_tags[i + j] << " ";
-        }
-        std::cout << '\n';
         auto qe = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> diff = qe - qs;
         latency_stats[i] = diff.count() * 1000;
@@ -248,6 +247,38 @@ void search_kernel(diskann::IndexUpdater<T> &index_updater,
           result_tags, recall_at, gs_tags, gt_dim, snapshot_inactive);
       mean_recall += query_recall;
     }
+//     auto                 s = std::chrono::high_resolution_clock::now();
+//     tsl::robin_set<uint32_t> snapshot_inactive[query_num];
+//       s = std::chrono::high_resolution_clock::now();
+// #pragma omp              parallel for num_threads(NUM_SEARCH_THREADS)
+//       for (_s64 i = 0; i < (int64_t) query_num; i++) {
+//         auto qs = std::chrono::high_resolution_clock::now();
+//         {
+//             std::lock_guard guard(active_mux);
+//             snapshot_inactive[i] = inactive_tags;
+//         }
+//         index_updater.search(query + (i * query_aligned_dim), recall_at, L,
+//                             (query_result_tags.data() + (i * recall_at)),
+//                              query_result_dists.data() + (i * recall_at),
+//                              stats + i);
+//         auto qe = std::chrono::high_resolution_clock::now();
+//         std::chrono::duration<double> diff = qe - qs;
+//         latency_stats[i] = diff.count() * 1000;
+//         //      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+//       }
+//     auto                          e = std::chrono::high_resolution_clock::now();
+    
+//     std::chrono::duration<double> diff = e - s;
+//     float                         qps = (float) (query_num / diff.count());
+//     // compute mean recall, IOs
+//     float mean_recall = 0.0f;
+//     for (uint32_t i = 0; i < query_num; i++) {
+//       auto *result_tags = query_result_tags.data() + (i * recall_at);
+//       auto *gs_tags = gt_tags + (i * gt_dim);
+//       float query_recall = compute_active_recall(
+//           result_tags, recall_at, gs_tags, gt_dim, snapshot_inactive[i]);
+//       mean_recall += query_recall;
+//     }
     mean_recall /= query_num;
     float mean_ios = (float) diskann::get_mean_stats(
         stats, query_num,
@@ -284,74 +315,73 @@ void search_kernel(diskann::IndexUpdater<T> &index_updater,
 template<typename T, typename TagT = uint32_t>
 void insertion_kernel(diskann::IndexUpdater<T, TagT> &index_updater,
                       std::string mem_pts_file, std::string mem_tags_file) {
-//   if (::_insertions_done.load()) {
-//     std::cout << "Insertions_done is true at the beginning of insertion kernel"
-//               << std::endl;
-//     exit(-1);
-//   }
-//   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-//   T *    data_insert = nullptr;
-//   size_t npts, ndim, aligned_dim;
-//   diskann::load_aligned_bin<T>(mem_pts_file, data_insert, npts, ndim,
-//                                aligned_dim);
-//   size_t tag_num, tag_dim;
-//   TagT * tag_data;
-//   diskann::load_bin<TagT>(mem_tags_file, tag_data, tag_num, tag_dim);
-//   if (tag_num != npts) {
-//     std::cout << "In insertion_kernel(), number of tags loaded is not equal to "
-//                  "number of points loaded. Exiting....."
-//               << std::endl;
-//     exit(-1);
-//   }
-//   size_t              i;
-//   std::vector<double> insert_latencies(npts, 0);
-//   diskann::Timer      timer;
-// // #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
-// //   for (i = 0; i < npts; i++) {
-// //     int            percentile = 0;
-// //     diskann::Timer insert_timer;
-// //     if (merge_insert.insert(data_insert + i * aligned_dim, tag_data[i],
-// //                             percentile) == 0) {
-// //       insert_latencies[i] = ((double) insert_timer.elapsed());
-// //     } else {
-// //       std::cout << "Point " << i << "could not be inserted." << std::endl;
-// //     }
-// //     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-// //     if ((i % 1000000 == 0) && (i > 0))
-// //       std::cout << "Inserted another 1M points" << std::endl;
-// //   }
-
-//   for (i = 0; i < npts; i += NUM_INSERT_THREADS) {
-//     std::this_thread::sleep_for(std::chrono::milliseconds(25));
-//     std::lock_guard guard(::active_mux);
-//     size_t lim = std::min(size_t(NUM_INSERT_THREADS), npts - i);
+  if (::_insertions_done.load()) {
+    std::cout << "Insertions_done is true at the beginning of insertion kernel"
+              << std::endl;
+    exit(-1);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+  T *    data_insert = nullptr;
+  size_t npts, ndim, aligned_dim;
+  diskann::load_aligned_bin<T>(mem_pts_file, data_insert, npts, ndim,
+                               aligned_dim);
+  size_t tag_num, tag_dim;
+  TagT * tag_data;
+  diskann::load_bin<TagT>(mem_tags_file, tag_data, tag_num, tag_dim);
+  if (tag_num != npts) {
+    std::cout << "In insertion_kernel(), number of tags loaded is not equal to "
+                 "number of points loaded. Exiting....."
+              << std::endl;
+    exit(-1);
+  }
+  std::vector<double> insert_latencies(npts, 0);
+  diskann::Timer      timer;
 // #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
-//     for (size_t j = 0; j < lim; j++) {
-//       diskann::Timer insert_timer;
-//       if (index_updater.insert(data_insert + (i + j) * aligned_dim, tag_data[i + j]) == 0) {
-//         insert_latencies[i + j] = ((double) insert_timer.elapsed());
-//       } else {
-//         std::cout << "Point " << i + j << "could not be inserted." << std::endl;
-//       }
-//       if (((i + j) % 1000000 == 0) && (i + j > 0))
-//         std::cout << "Inserted another 1M points" << std::endl;
+//   for (size_t i = 0; i < npts; i++) {
+//     int            percentile = 0;
+//     diskann::Timer insert_timer;
+//     if (merge_insert.insert(data_insert + i * aligned_dim, tag_data[i],
+//                             percentile) == 0) {
+//       insert_latencies[i] = ((double) insert_timer.elapsed());
+//     } else {
+//       std::cout << "Point " << i << "could not be inserted." << std::endl;
 //     }
-//     for (int j = 0; j < NUM_INSERT_THREADS && i + j < npts; j++) {
-//       ::inactive_tags.erase(tag_data[i + j]);
-//     }
+//     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+//     if ((i % 1000000 == 0) && (i > 0))
+//       std::cout << "Inserted another 1M points" << std::endl;
 //   }
-//   std::sort(insert_latencies.begin(), insert_latencies.end());
-//   std::cout << "Mem index insertion time : " << timer.elapsed() / 1000 << " ms"
-//             << std::endl
-//             << "10th percentile insertion time : "
-//             << insert_latencies[0.10 * npts] << " microsec" << std::endl
-//             << "50th percentile insertion time : "
-//             << insert_latencies[0.5 * npts] << " microsec"
-//             << "90th percentile insertion time : "
-//             << insert_latencies[0.90 * npts] << " microsec" << std::endl;
+
+  for (size_t i = 0; i < npts; i += NUM_INSERT_THREADS) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::lock_guard guard(::active_mux);
+    size_t lim = std::min(size_t(NUM_INSERT_THREADS), npts - i);
+#pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
+    for (size_t j = 0; j < lim; j++) {
+      diskann::Timer insert_timer;
+      if (index_updater.insert(data_insert + (i + j) * aligned_dim, tag_data[i + j]) == 0) {
+        insert_latencies[i + j] = ((double) insert_timer.elapsed());
+      } else {
+        std::cout << "Point " << i + j << "could not be inserted." << std::endl;
+      }
+      if (((i + j) % 1000000 == 0) && (i + j > 0))
+        std::cout << "Inserted another 1M points" << std::endl;
+    }
+    for (size_t j = 0; j < lim; j++) {
+      ::inactive_tags.erase(tag_data[i + j]);
+    }
+  }
+  std::sort(insert_latencies.begin(), insert_latencies.end());
+  std::cout << "Mem index insertion time : " << timer.elapsed() / 1000 << " ms"
+            << std::endl
+            << "10th percentile insertion time : "
+            << insert_latencies[0.10 * npts] << " microsec" << std::endl
+            << "50th percentile insertion time : "
+            << insert_latencies[0.5 * npts] << " microsec"
+            << "90th percentile insertion time : "
+            << insert_latencies[0.90 * npts] << " microsec" << std::endl;
   ::_insertions_done.store(true);
-//   delete[] data_insert;
-//   delete[] tag_data;
+  delete[] data_insert;
+  delete[] tag_data;
 }
 template<typename T, typename TagT = uint32_t>
 void deletion_kernel(diskann::IndexUpdater<T, TagT> &index_updater,
@@ -524,7 +554,7 @@ int main(int argc, char **argv) {
                  "<mem_prefix> <L_disk> "
                  "<alpha_disk> "
               << "<full_data_bin> <query_bin> <truthset> "
-              << "<n_iters> <total_insert_count> <total_delete_count> <background_threads_num> <range> "
+              << "<n_iters> <insert_per_iter> <delete_per_iter> <background_threads_num> <range> "
                  "<recall_k> "
                  "<search_L1> <search_L2> <search_L3> ...."
               << "\n WARNING: Other parameters set inside CPP source."

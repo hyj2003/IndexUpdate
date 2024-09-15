@@ -22,6 +22,7 @@
 
 // returns region of `node_buf` containing [COORD(T)]
 #define OFFSET_TO_NODE_COORDS(node_buf) (T *) (node_buf)
+#define MAX_PROCESSING_PAGES 65536
 
 #define THREAD_INSERT 5
 #define THREAD_DELETE 5
@@ -92,6 +93,7 @@ namespace diskann {
     }
     delete this->update_thread_pq_scratch;
     delete this->update_thread_pq_scratch_u16;
+    delete this->update_thread_page_scratch;
   }
   template<typename T, typename TagT>
   int FreshPQFlashIndex<T, TagT>::load(uint32_t num_threads, const char *pq_prefix,
@@ -233,25 +235,82 @@ namespace diskann {
       memcpy(new_tags, this->tags, sizeof(TagT) * this->num_points);
       delete[] this->tags;
       this->tags = new_tags;
+      this->cur_max_id_ = 0;
       for (_u64 i = 0; i < this->num_points; i++) {
+        if (uint32_t(this->tags[i]) == std::numeric_limits<uint32_t>::max()) {
+          continue;
+        }
         this->inv_tags[this->tags[i]] = i;
+        this->cur_max_id_ = std::max(this->cur_max_id_, (_u32)this->tags[i] + 1);
       }
+      std::cout << "Current max id: "<< this->cur_max_id_ << std::endl;
     }
+    /* Extend disk index */
+    _u64 new_n_sectors = ROUND_UP(this->max_index_num_, this->nnodes_per_sector) / this->nnodes_per_sector;
+    _u64 new_disk_index_file_size = (new_n_sectors + 1) * SECTOR_LEN;
+    {
+      std::fstream disk_writer(this->disk_index_file, std::ios::in | std::ios::out | std::ios::binary);
+      std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
+      *(_u64 *) (sector_buf.get() + 0 * sizeof(_u64)) = new_disk_index_file_size;
+      *(_u64 *) (sector_buf.get() + 1 * sizeof(_u64)) = max_index_num;
+      //    *(_u64 *) (sector_buf.get() + 2 * sizeof(_u64)) = ndims_64;
+      *(_u64 *) (sector_buf.get() + 2 * sizeof(_u64)) = medoid_id_on_file;
+      *(_u64 *) (sector_buf.get() + 3 * sizeof(_u64)) = this->max_node_len;
+      *(_u64 *) (sector_buf.get() + 4 * sizeof(_u64)) = this->nnodes_per_sector;
+      disk_writer.seekp(0, std::ios::beg);
+      disk_writer.write(sector_buf.get(), SECTOR_LEN);
+      disk_writer.close();
+    }
+    {
+      std::fstream disk_writer(this->disk_index_file, std::ios::app | std::ios::out | std::ios::binary);
+      _u16 old_n_sectors = ROUND_UP(this->num_points, this->nnodes_per_sector) / this->nnodes_per_sector;
+      std::cout << (uint64_t)disk_writer.tellp() << std::endl;
+      disk_writer.seekp(0, std::ios::end);
+      std::cout << "Previous position: " << old_n_sectors << " " << (uint64_t)disk_writer.tellp() << std::endl;
+      std::unique_ptr<char[]> sector_buf = std::make_unique<char[]>(SECTOR_LEN);
+      memset(sector_buf.get(), 0, sizeof(SECTOR_LEN));
+      size_t accumulate_pages = 0;
+      for (_u64 i = old_n_sectors; i < new_n_sectors; i++) {
+        disk_writer.write(sector_buf.get(), SECTOR_LEN);
+        if (++accumulate_pages == 512) {
+          disk_writer.flush();
+          accumulate_pages = 0;
+        }
+      }
+      std::cout << "Write position: " <<  new_n_sectors << " " << (uint64_t)disk_writer.tellp() << std::endl;
+      disk_writer.flush();
+      disk_writer.close();
+    }
+    /* Extend pq table */
+    {
+      auto old_pq = this->data;
+      this->data = new _u8[this->n_chunks * max_index_num];
+      memcpy(this->data, old_pq, this->n_chunks * max_index_num * sizeof(_u8));
+      delete old_pq;
+    }
+    
     std::cout << "Allocating thread scratch space -- " << PER_THREAD_BUF_SIZE / (1<<20) << " MB / thread.\n";
     alloc_aligned((void**) &this->update_thread_pq_scratch, num_threads * PER_THREAD_BUF_SIZE, SECTOR_LEN);
-    alloc_aligned((void**) &this->update_thread_pq_scratch_u16, num_threads * PER_THREAD_BUF_SIZE, SECTOR_LEN);
+    alloc_aligned((void**) &this->update_thread_pq_scratch_u16, num_threads * PER_THREAD_BUF_SIZE * 2, SECTOR_LEN);
+    alloc_aligned((void**) &this->update_thread_page_scratch, MAX_PROCESSING_PAGES * SECTOR_LEN * 2, SECTOR_LEN);
+    
     for (uint32_t i = 0; i < num_threads; i++) {
       UpdateThreadData<T> u_data;
-      u_data.scratch.scratch_ = this->update_thread_pq_scratch;
-      u_data.scratch.scratch_u16_ = this->update_thread_pq_scratch_u16;
+      u_data.scratch.scratch_ = this->update_thread_pq_scratch + PER_THREAD_BUF_SIZE * i;
+      u_data.scratch.scratch_u16_ = this->update_thread_pq_scratch_u16 + PER_THREAD_BUF_SIZE * i;
       u_data.ctx = this->reader->get_ctx();
       u_data.output_writer = new std::fstream;
-      u_data.output_writer->open(this->disk_index_file, std::ios::out | std::ios::binary);
+      u_data.output_writer->open(this->disk_index_file, std::ios::in | std::ios::out | std::ios::binary);
       scratch_queue_.push(u_data);
       scratch_queue_.push_notify_all();
     }
+    for (uint32_t i = 0; i < MAX_PROCESSING_PAGES; i++) {
+      auto pair = std::make_pair(this->update_thread_page_scratch + SECTOR_LEN * (2 * i),
+                                 this->update_thread_page_scratch + SECTOR_LEN * (2 * i + 1));
+      page_pairs_queue_.push(pair);
+    }
     this->in_degree_ = new _u32[max_index_num];
-
+    memset(this->in_degree_, 0, sizeof(_u32) * max_index_num);
     return 0;
   }
   template<typename T, typename TagT>
@@ -315,13 +374,6 @@ namespace diskann {
     uint64_t sectors_per_scan = SECTORS_PER_MERGE;
     char* buf = nullptr;
     alloc_aligned((void**)&buf, sectors_per_scan * SECTOR_LEN, SECTOR_LEN);
-    uint64_t backing_buf_size = (uint64_t) sectors_per_scan * ROUND_UP(this->max_node_len, 32);
-    backing_buf_size = ROUND_UP(backing_buf_size, 256);
-    char* backing_buf = nullptr;
-    alloc_aligned((void**) &backing_buf, backing_buf_size, 256);
-    memset(backing_buf, 0, backing_buf_size);
-    uint64_t backing_buf_unit_size = ROUND_UP(this->max_node_len, 32);
-    uint64_t backing_buf_idx = 0;
 
     ThreadData<T> data = this->thread_data.pop();
     while (data.scratch.sector_scratch == nullptr) {
@@ -340,7 +392,6 @@ namespace diskann {
       assert(this->reader);
 
       this->reader->read(reads, ctx);
-      backing_buf_idx = 0;
       // scan each sector
       for (uint32_t i = 0; i < sectors_per_scan && n_scanned < this->num_points;
            i++) {
@@ -348,27 +399,26 @@ namespace diskann {
         // scan each node
         for (uint32_t j = 0;
              j < this->nnodes_per_sector && n_scanned < this->num_points; j++) {
+          // std::cout << j << std::endl;
           char *node_buf = OFFSET_TO_NODE(sector_buf, n_scanned);
           // if in delete_set, add to deleted_nodes
           if (this->delete_cache_.find(n_scanned) == this->delete_cache_.end()) {
-            char *buf_start =
-                backing_buf + (backing_buf_idx * backing_buf_unit_size);
-            backing_buf_idx++;
-            memcpy(buf_start, node_buf, this->max_node_len);
             // create disk node object from backing buf instead of `buf`
-            DiskNode<T> node(n_scanned, OFFSET_TO_NODE_COORDS(buf_start),
-                             OFFSET_TO_NODE_NHOOD(buf_start));
+            DiskNode<T> node(n_scanned, OFFSET_TO_NODE_COORDS(node_buf),
+                             OFFSET_TO_NODE_NHOOD(node_buf));
             uint32_t nnbrs = node.nnbrs;
             unsigned *nbrs = node.nbrs;
-            for (uint32_t j = 0; j < nnbrs; j++) {
-              this->in_degree_[nbrs[j]]++;
+            for (uint32_t k = 0; k < nnbrs; k++) {
+              this->in_degree_[nbrs[k]]++;
+              assert(nbrs[k] < this->num_points);
             }
           }
           n_scanned++;
         }
       }
-      backing_buf_idx = 0;
+      reads[0].offset = NODE_SECTOR_NO(n_scanned) * SECTOR_LEN;
     }
+    std::cout << "Compute in-degree finished.\n";
     this->thread_data.push(data);
     this->thread_data.push_notify_all();
     aligned_free((void*) buf);
@@ -519,16 +569,22 @@ namespace diskann {
         if (retset[marker].flag) {
           num_seen++;
           auto iter = this->nhood_cache.find(retset[marker].id);
-          if (iter != this->nhood_cache.end()) {
-            cached_nhoods.push_back(
-                std::make_pair(retset[marker].id, iter->second));
-            // #pragma omp atomic 
-            //   cache_hit++;
-            if (stats != nullptr) {
-              stats->n_cache_hits++;
+          {
+            std::shared_lock<std::shared_mutex> page_cache_guard(page_cache_lock_);
+            auto p_iter = page_cache_.find(retset[marker].id);
+            if (iter != this->nhood_cache.end()) {
+              cached_nhoods.push_back(
+                  std::make_pair(retset[marker].id, iter->second));
+              // #pragma omp atomic 
+              //   cache_hit++;
+              if (stats != nullptr) {
+                stats->n_cache_hits++;
+              }
+            } else if (false) {
+
+            } else {
+              frontier.push_back(retset[marker].id);
             }
-          } else {
-            frontier.push_back(retset[marker].id);
           }
           retset[marker].flag = false;
           if (this->count_visited_nodes) {
@@ -560,8 +616,9 @@ namespace diskann {
           num_ios++;
         }
         io_timer.reset();
-        n_ops = this->reader->submit_reqs(frontier_read_reqs, ctx);  
-        // synchronous IO linux
+        this->reader->read(frontier_read_reqs, ctx);
+        // n_ops = this->reader->submit_reqs(frontier_read_reqs, ctx);  
+        // asynchronous IO linux
         // need implementation  of async to overlap the cost of locks
         if (stats != nullptr) {
           stats->io_us += io_timer.elapsed();
@@ -602,9 +659,9 @@ namespace diskann {
           if (visited.find(id) != visited.end()) {
             continue;
           } else {
+            visited.insert(id);
             if (!this->del_filter_.get(id)) {
               n_ids.push_back(id);
-              visited.insert(id);
             } else if (two_hops <= this->two_hops_lim) {
               auto iter = this->delete_cache_.find(id);
               auto sz = iter->second.first;
@@ -625,12 +682,13 @@ namespace diskann {
           auto iter = this->insert_edges_.find(cached_nhood.first);
           if (iter != this->insert_edges_.end()) {
             for (auto id : iter->second) {
-              if (this->del_filter_.get(id)) continue;
+              if (visited.find(id) != visited.end() && del_filter_.get(id)) continue;
               n_ids.emplace_back(id);
+              visited.insert(id);
             }
           }
         }
-        assert(n_ids.size() < maxc);
+        // assert(n_ids.size() < maxc);
         cpu_timer.reset();
         compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
         if (stats != nullptr) {
@@ -663,11 +721,11 @@ namespace diskann {
         }
         n_ids.clear();
       }
-      if (!frontier.empty()) {
-        this->reader->get_events(ctx, n_ops);
-      }
+      // if (!frontier.empty()) {
+      //   this->reader->get_events(ctx, n_ops);
+      // }
       for (auto &reqs : frontier_read_reqs) {
-        // PushVisitedPage(reqs.offset / SECTOR_LEN, (char *)reqs.buf); // send current page to page processor
+        PushVisitedPage(reqs.offset / SECTOR_LEN, (char *)reqs.buf); // send current page to page processor
       }
       for (auto &frontier_nhood : frontier_nhoods) {
         char *node_disk_buf =
@@ -704,9 +762,9 @@ namespace diskann {
           if (visited.find(id) != visited.end()) {
             continue;
           } else {
+            visited.insert(id);
             if (!this->del_filter_.get(id)) {
               n_ids.push_back(id);
-              visited.insert(id);
             } else if (two_hops <= this->two_hops_lim) {
               auto iter = this->delete_cache_.find(id);
               auto sz = iter->second.first;
@@ -727,12 +785,13 @@ namespace diskann {
           auto iter = this->insert_edges_.find(frontier_nhood.first);
           if (iter != this->insert_edges_.end()) {
             for (auto id : iter->second) {
-              if (this->del_filter_.get(id)) continue;
+              if (visited.find(id) != visited.end() && this->del_filter_.get(id)) continue;
               n_ids.emplace_back(id);
+              visited.insert(id);
             }
           }
         }
-        assert(n_ids.size() < maxc);
+        // assert(n_ids.size() < maxc);
         cpu_timer.reset();
         compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
         if (stats != nullptr) {
@@ -763,6 +822,7 @@ namespace diskann {
                      // updated
                      // due to neighbors of n.
         }
+        // std::cout << n_ids.size() << std::endl;
         n_ids.clear();
       }
       }
@@ -859,7 +919,7 @@ namespace diskann {
       this->compute_pq_dists(id, &(iter.id), &iter.distance, 1, scratch);
     }
     sort(result.begin(), result.end());
-    result.resize(range);
+    result.resize(std::min(result.size(), range));
   }
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::PruneNeighbors(DiskNode<T> &disk_node, 
@@ -914,8 +974,17 @@ namespace diskann {
     }
     std::vector<_u32> del_nbrs;
     for (auto &disk_node : disk_nodes) {
+      // if (del_filter_.get(disk_node.id)) {
+      //   std::shared_lock<std::shared_mutex> insert_guard(this->insert_edges_lock_);
+      //   disk_node.nnbr = 0;
+      //   auto iter = this->insert_edges_.find(disk_node.id);
+      //   if (iter != this->insert_edges_.end()) {
+      //     this->insert_edges_.erase(iter);
+      //   }
+      //   auto 
+      //   continue;
+      // }
       std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
-      std::shared_lock<std::shared_mutex> insert_guard(this->insert_edges_lock_);
       auto      id = disk_node.id;
       auto      nnbrs = disk_node.nnbrs;
       unsigned *nbrs = disk_node.nbrs;
@@ -960,13 +1029,17 @@ namespace diskann {
     }
     /* write on page[sector_id] */
     std::fstream &output_writer = *upd->output_writer;
-    this->dump_to_disk(output_writer, disk_nodes, (sector_id - 1) * this->nnodes_per_sector, sector_buf, 1);
+    // output_writer.open(this->disk_index_file, std::ios::out | std::ios::binary);
+    this->dump_to_disk(output_writer, (sector_id - 1) * this->nnodes_per_sector, sector_buf, 1);
     output_writer.flush();
     {
       std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
       page_cache_.erase(sector_id);
     }
     /* Finish updating */
+    auto pair = std::make_pair(sector_buf, tmp_buf);
+    this->page_pairs_queue_.push(pair);
+    this->page_pairs_queue_.push_notify_all();
     this->scratch_queue_.push(*upd);
     this->scratch_queue_.push_notify_all();
     {
@@ -988,14 +1061,22 @@ namespace diskann {
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::PushVisitedPage(_u64 sector_id, char *sector_buf) {
     /* copy buffers */
+    std::pair<char*, char*> pair = this->page_pairs_queue_.pop();
+    while (pair.first == nullptr) {
+      this->page_pairs_queue_.wait_for_push_notify();
+      pair = this->page_pairs_queue_.pop();
+    }
     UpdateThreadData<T> data = this->scratch_queue_.pop();
-    while (data.scratch.page_buf_ == nullptr) {
+    while (data.output_writer == nullptr) {
       this->scratch_queue_.wait_for_push_notify();
       data = this->scratch_queue_.pop();
     }
     // IOContext ctx = data.ctx;
+    data.scratch.page_buf_ = pair.first;
+    data.scratch.page_buf_copied_ = pair.second;
     memcpy(data.scratch.page_buf_, sector_buf, SECTOR_LEN);
     auto new_req = std::make_pair(sector_id, &data);
+    // std::cout << reqs_queue_.size() << std::endl;
     reqs_queue_.push(new_req);
     reqs_queue_.push_notify_all();
   }
@@ -1007,6 +1088,7 @@ namespace diskann {
       this->reqs_queue_.wait_for_push_notify();
       req = this->reqs_queue_.pop();
     }
+    // std::cout << req.first << std::endl;
     if (!update_flag) {
       return ;
     }
@@ -1027,17 +1109,22 @@ namespace diskann {
     /* Read then process*/
     _u32 internal_id = this->inv_tags[external_id];
     /* Read */
+    std::pair<char*, char*> pair = this->page_pairs_queue_.pop();
+    while (pair.first == nullptr) {
+      this->page_pairs_queue_.wait_for_push_notify();
+      pair = this->page_pairs_queue_.pop();
+    }
     UpdateThreadData<T> data = this->scratch_queue_.pop();
-    while (data.scratch.page_buf_ == nullptr) {
+    while (data.output_writer == nullptr) {
       this->scratch_queue_.wait_for_push_notify();
       data = this->scratch_queue_.pop();
     }
     IOContext ctx = data.ctx;
     std::vector<AlignedRead> read_reqs;
-    read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, data.scratch.page_buf_);
+    read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, pair.first);
     this->reader->read(read_reqs, ctx);
     char *node_disk_buf =
-          OFFSET_TO_NODE(data.scratch.page_buf_, internal_id);
+          OFFSET_TO_NODE(pair.first, internal_id);
     unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
     _u64      nnbrs = (_u64)(*node_buf);
     unsigned *node_nbrs = (node_buf + 1);
@@ -1054,8 +1141,12 @@ namespace diskann {
         this->in_degree_[node_nbrs[i]]--;
       }
     }
+    this->scratch_queue_.push(data);
+    this->scratch_queue_.push_notify_all();
+    this->page_pairs_queue_.push(pair);
+    this->page_pairs_queue_.push_notify_all();
     // ProcessPage(NODE_SECTOR_NO(((size_t) internal_id)), &data);
-    PushVisitedPage(NODE_SECTOR_NO(((size_t) internal_id)), data.scratch.page_buf_);
+    // PushVisitedPage(NODE_SECTOR_NO(((size_t) internal_id)), data.scratch.page_buf_);
     /* release free ids*/
     // RecycleId(internal_id);
   }
@@ -1063,19 +1154,66 @@ namespace diskann {
   void FreshPQFlashIndex<T, TagT>::PushInsert(_u32 external_id, T *point) {
     /* Assign an internal id & update tags */
     _u32 internal_id = GetInternalId();
+    this->tags[internal_id] = external_id;
+    this->inv_tags[external_id] = internal_id;
     std::vector<uint8_t> pq_coords = this->deflate_vector(point);
     uint64_t pq_offset = (uint64_t) internal_id * (uint64_t) this->n_chunks;
     memcpy(this->data + pq_offset, pq_coords.data(), this->n_chunks * sizeof(uint8_t));
     /* Search */
-    std::vector<_u64> res(range);
-    this->filtered_beam_search(point, range, 75, res.data(), nullptr, 2, nullptr, nullptr, nullptr);
-    /* Add edges */
-    std::unique_lock<std::shared_mutex> guard(insert_edges_lock_);
+    std::vector<_u64> res(l_index); res.reserve(l_index);
+    this->filtered_beam_search(point, l_index, l_index, res.data(), nullptr, beam_width);
+    std::vector<_u32> insertions; insertions.reserve(l_index);
     for (auto id : res) {
-      insert_edges_[id].emplace_back(internal_id);
+      insertions.emplace_back(id);
     }
-    std::vector<_u32> ins(res.begin(), res.end());
-    insert_edges_.insert(std::make_pair(internal_id, std::move(ins)));
+    // std::cout << "Insert size: " << insertions.size() << std::endl;
+    /* Add edges */
+    // std::unique_lock<std::shared_mutex> guard(insert_edges_lock_);
+    // for (auto iter : insertions) {
+    //   insert_edges_[iter.id].emplace_back(internal_id);
+    // }
+    // insert_edges_.insert(std::make_pair(internal_id, std::move(insertions)));
+
+    /* Add edges */
+    std::pair<char*, char*> pair = this->page_pairs_queue_.pop();
+    while (pair.first == nullptr) {
+      this->page_pairs_queue_.wait_for_push_notify();
+      pair = this->page_pairs_queue_.pop();
+    }
+    UpdateThreadData<T> data = this->scratch_queue_.pop();
+    while (data.output_writer == nullptr) {
+      this->scratch_queue_.wait_for_push_notify();
+      data = this->scratch_queue_.pop();
+    }
+    IOContext ctx = data.ctx;
+    std::vector<AlignedRead> read_reqs;
+    read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, pair.first);
+    this->reader->read(read_reqs, ctx);
+    char *node_disk_buf =
+          OFFSET_TO_NODE(pair.first, internal_id);
+    T        *vec_buf = OFFSET_TO_NODE_COORDS(node_disk_buf);
+    unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+    memcpy(vec_buf, point, sizeof(T) * this->data_dim);
+    DiskNode<T> disk_node(internal_id, vec_buf, node_buf);
+    PruneNeighbors(disk_node, insertions, data.scratch.scratch_, data.scratch.scratch_u16_);
+    std::fstream &output_writer = *data.output_writer;
+    // output_writer.open(this->disk_index_file, std::ios::out | std::ios::binary);
+    this->dump_to_disk(output_writer, (NODE_SECTOR_NO(internal_id) - 1) * this->nnodes_per_sector, pair.first, 1);
+    output_writer.flush();
+    {
+      std::unique_lock<std::shared_mutex> guard(insert_edges_lock_);
+      _u64      nnbrs = (_u64)(*node_buf);
+      unsigned *node_nbrs = (node_buf + 1);
+      for (_u64 i = 0; i < nnbrs; i++) {
+        // std::cout << node_nbrs[i] << " ";
+        insert_edges_[node_nbrs[i]].emplace_back(internal_id);
+      }
+      // std::cout << std::endl;
+    }
+    this->scratch_queue_.push(data);
+    this->scratch_queue_.push_notify_all();
+    this->page_pairs_queue_.push(pair);
+    this->page_pairs_queue_.push_notify_all();
   }
   // instantiations
   template class FreshPQFlashIndex<float, int32_t>;

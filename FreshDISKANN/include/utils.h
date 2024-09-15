@@ -61,7 +61,8 @@ namespace diskann {
     return p;
   }
   template <typename Block = uint64_t> struct Bitset {
-    constexpr static int block_size = sizeof(Block) * 8;
+    const int block_size = sizeof(Block) * 8;
+    const Block full_set = (Block(1) << block_size) - 1;
     int nbytes;
     Block *data;
     explicit Bitset(int n)
@@ -73,26 +74,29 @@ namespace diskann {
     void set(int i) {
       data[i / block_size] |= (Block(1) << (i & (block_size - 1)));
     }
+    void reset(int i) {
+      data[i / block_size] &= (full_set ^ (Block(1) << (i & (block_size - 1))));
+    }
     bool get(int i) {
       return (data[i / block_size] >> (i & (block_size - 1))) & 1;
     }
 
     void *block_address(int i) { return data + i / block_size; }
   };
-  struct VisitedList {
-    Bitset<uint64_t> high, low;
-    static constexpr int B = (1 << 12) - 1;
-    VisitedList() = delete;
-    int cnt = 0;
-    explicit VisitedList(int n) : high(B + 1), low(n) {}
-    bool get(int i) {
-      return high.get(i & B) && low.get(i);
-    }
-    void set(int i) {
-      high.set(i & B);
-      low.set(i);
-    }
-  };
+  // struct VisitedList {
+  //   Bitset<uint64_t> high, low;
+  //   static constexpr int B = (1 << 12) - 1;
+  //   VisitedList() = delete;
+  //   int cnt = 0;
+  //   explicit VisitedList(int n) : high(B + 1), low(n) {}
+  //   bool get(int i) {
+  //     return high.get(i & B) && low.get(i);
+  //   }
+  //   void set(int i) {
+  //     high.set(i & B);
+  //     low.set(i);
+  //   }
+  // };
   enum Metric { L2 = 0, INNER_PRODUCT = 1, FAST_L2 = 2, PQ = 3 };
 
   DISKANN_DLLEXPORT float calc_recall_set_tags(
