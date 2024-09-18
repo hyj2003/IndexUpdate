@@ -80,14 +80,11 @@ namespace diskann {
   template<typename T, typename TagT>
   FreshPQFlashIndex<T, TagT>::FreshPQFlashIndex(
       std::shared_ptr<AlignedFileReader> &fileReader)
-      : PQFlashIndex<T, TagT>(fileReader) {
+      : PQFlashIndex<T, TagT>(fileReader), page_locks_write_(kPageLocks), page_locks_read_(kPageLocks) {
   }
 
   template<typename T, typename TagT>
   FreshPQFlashIndex<T, TagT>::~FreshPQFlashIndex() {
-    for (auto iter : delete_cache_) {
-      delete[] iter.second.second;
-    }
     while (!scratch_queue_.empty()) {
       scratch_queue_.pop().output_writer->close();
     }
@@ -123,6 +120,7 @@ namespace diskann {
     size_t npts_u64, nchunks_u64;
     diskann::load_bin<_u8>(pq_compressed_vectors, this->data, npts_u64, nchunks_u64);
 
+    // max_index_num = this->num_points = npts_u64; // Used when don't want to affect the original index file.
     this->num_points = npts_u64;
     this->n_chunks = nchunks_u64;
 
@@ -290,11 +288,11 @@ namespace diskann {
     }
     
     std::cout << "Allocating thread scratch space -- " << PER_THREAD_BUF_SIZE / (1<<20) << " MB / thread.\n";
-    alloc_aligned((void**) &this->update_thread_pq_scratch, num_threads * PER_THREAD_BUF_SIZE, SECTOR_LEN);
-    alloc_aligned((void**) &this->update_thread_pq_scratch_u16, num_threads * PER_THREAD_BUF_SIZE * 2, SECTOR_LEN);
+    alloc_aligned((void**) &this->update_thread_pq_scratch, 4 * num_threads * PER_THREAD_BUF_SIZE, SECTOR_LEN);
+    alloc_aligned((void**) &this->update_thread_pq_scratch_u16, 4 * num_threads * PER_THREAD_BUF_SIZE * 2, SECTOR_LEN);
     alloc_aligned((void**) &this->update_thread_page_scratch, MAX_PROCESSING_PAGES * SECTOR_LEN * 2, SECTOR_LEN);
     
-    for (uint32_t i = 0; i < num_threads; i++) {
+    for (uint32_t i = 0; i < num_threads * 4; i++) {
       UpdateThreadData<T> u_data;
       u_data.scratch.scratch_ = this->update_thread_pq_scratch + PER_THREAD_BUF_SIZE * i;
       u_data.scratch.scratch_u16_ = this->update_thread_pq_scratch_u16 + PER_THREAD_BUF_SIZE * i;
@@ -305,12 +303,16 @@ namespace diskann {
       scratch_queue_.push_notify_all();
     }
     for (uint32_t i = 0; i < MAX_PROCESSING_PAGES; i++) {
-      auto pair = std::make_pair(this->update_thread_page_scratch + SECTOR_LEN * (2 * i),
-                                 this->update_thread_page_scratch + SECTOR_LEN * (2 * i + 1));
+      std::pair<char*, char*> p;
+      assert(p.first == nullptr);
+      auto pair = PagePair(this->update_thread_page_scratch + SECTOR_LEN * (2 * i),
+                           this->update_thread_page_scratch + SECTOR_LEN * (2 * i + 1));
       page_pairs_queue_.push(pair);
     }
     this->in_degree_ = new _u32[max_index_num];
     memset(this->in_degree_, 0, sizeof(_u32) * max_index_num);
+    // this->page_locks_.resize(kPageLocks);
+    // this->page_locks_.reserve(kPageLocks);
     return 0;
   }
   template<typename T, typename TagT>
@@ -359,9 +361,7 @@ namespace diskann {
           non_deleted_nbrs.push_back(id);
         }
       }
-      uint32_t *nbr = new uint32_t[non_deleted_nbrs.size()];
-      memcpy(nbr, non_deleted_nbrs.data(), non_deleted_nbrs.size() * sizeof(uint32_t));
-      this->delete_cache_.insert(std::make_pair(nhood.id, std::make_pair(non_deleted_nbrs.size(), nbr)));
+      this->delete_cache_.insert(std::make_pair(nhood.id, std::move(non_deleted_nbrs.size())));
       this->del_filter_.set(nhood.id);
     }
     std::cout << "Deleted nodes cached with " << this->delete_cache_.size() << " nodes." << std::endl;
@@ -422,6 +422,43 @@ namespace diskann {
     this->thread_data.push(data);
     this->thread_data.push_notify_all();
     aligned_free((void*) buf);
+    // std::vector<_u32> deg(this->in_degree_, this->in_degree_ + this->num_points);
+    // sort(deg.begin(), deg.end(), [](_u32 i, _u32 j) { return i > j; });
+    // std::cout << "0 ~ 9:" << std::endl;
+    // for (int i = 0; i < 10; i++) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "10 ~ 90:" << std::endl;
+    // for (int i = 10; i < 100; i += 10) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "100 ~ 900:" << std::endl;
+    // for (int i = 100; i < 1000; i += 100) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "1000 ~ 9000:" << std::endl;
+    // for (int i = 1000; i < 10000; i += 1000) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "10000 ~ 90000:" << std::endl;
+    // for (int i = 10000; i < 100000; i += 10000) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "100000 ~ 900000:" << std::endl;
+    // for (int i = 100000; i < 1000000; i += 100000) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "1000000 ~ 9000000:" << std::endl;
+    // for (int i = 1000000; i < 10000000; i += 1000000) {
+    //   std::cout << deg[i] << " ";
+    // }
+    // std::cout << std::endl;
   }
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::filtered_beam_search(
@@ -570,8 +607,8 @@ namespace diskann {
           num_seen++;
           auto iter = this->nhood_cache.find(retset[marker].id);
           {
-            std::shared_lock<std::shared_mutex> page_cache_guard(page_cache_lock_);
-            auto p_iter = page_cache_.find(retset[marker].id);
+            // std::shared_lock<std::shared_mutex> page_cache_guard(page_cache_lock_);
+            // auto p_iter = page_cache_.find(retset[marker].id);
             if (iter != this->nhood_cache.end()) {
               cached_nhoods.push_back(
                   std::make_pair(retset[marker].id, iter->second));
@@ -616,16 +653,21 @@ namespace diskann {
           num_ios++;
         }
         io_timer.reset();
-        this->reader->read(frontier_read_reqs, ctx);
+        {
+          std::shared_lock<std::shared_mutex> guard(page_locks_read_[NODE_SECTOR_NO(((size_t) frontier[0])) & (kPageLocks - 1)]);
+          // printf("node: %u\n", frontier[0]);
+          this->reader->read(frontier_read_reqs, ctx);
+        }
         // n_ops = this->reader->submit_reqs(frontier_read_reqs, ctx);  
         // asynchronous IO linux
-        // need implementation  of async to overlap the cost of locks
+        // may need implementation of async to overlap the cost of locks
         if (stats != nullptr) {
           stats->io_us += io_timer.elapsed();
         }
       }
       {
       std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
+      printf("Get delete_cache_lock_ in search.\n");
       // process cached nhoods
       for (auto &cached_nhood : cached_nhoods) {
         auto global_cache_iter = this->coord_cache.find(cached_nhood.first);
@@ -660,18 +702,18 @@ namespace diskann {
             continue;
           } else {
             visited.insert(id);
+            assert(id < this->cur_max_id_);
             if (!this->del_filter_.get(id)) {
               n_ids.push_back(id);
-            } else if (two_hops <= this->two_hops_lim) {
+            } else if (two_hops < this->two_hops_lim) {
               auto iter = this->delete_cache_.find(id);
-              auto sz = iter->second.first;
-              auto ne = iter->second.second;
-              for (_u32 i = 0; i < sz && two_hops <= this->two_hops_lim; i++) {
-                if (visited.find(ne[i]) == visited.end() &&
-                    !this->del_filter_.get(ne[i])) {
-                  n_ids.push_back(ne[i]);
+              auto &vec = iter->second;
+              for (auto nei : vec) {
+                if (two_hops >= this->two_hops_lim) break;
+                if (visited.find(nei) == visited.end() && !this->del_filter_.get(nei)) {
+                  n_ids.push_back(nei);
+                  visited.insert(nei);
                   two_hops++;
-                  visited.insert(ne[i]);
                 }
               }
             }
@@ -683,6 +725,7 @@ namespace diskann {
           if (iter != this->insert_edges_.end()) {
             for (auto id : iter->second) {
               if (visited.find(id) != visited.end() && del_filter_.get(id)) continue;
+              assert(id < this->cur_max_id_);
               n_ids.emplace_back(id);
               visited.insert(id);
             }
@@ -725,6 +768,7 @@ namespace diskann {
       //   this->reader->get_events(ctx, n_ops);
       // }
       for (auto &reqs : frontier_read_reqs) {
+        // printf("Pass page: %llu\n", reqs.offset / SECTOR_LEN);
         PushVisitedPage(reqs.offset / SECTOR_LEN, (char *)reqs.buf); // send current page to page processor
       }
       for (auto &frontier_nhood : frontier_nhoods) {
@@ -734,7 +778,7 @@ namespace diskann {
         _u64      nnbrs = (_u64)(*node_buf);
         T *       node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
         assert(data_buf_idx < MAX_N_CMPS);
-
+        // printf("Frontier: %lu\n", frontier_nhood.first);
         T *node_fp_coords_copy = data_buf + (data_buf_idx * this->aligned_dim);
         data_buf_idx++;
         memcpy(node_fp_coords_copy, node_fp_coords, this->data_dim * sizeof(T));
@@ -762,19 +806,19 @@ namespace diskann {
           if (visited.find(id) != visited.end()) {
             continue;
           } else {
+            assert(id < this->cur_max_id_);
             visited.insert(id);
             if (!this->del_filter_.get(id)) {
               n_ids.push_back(id);
-            } else if (two_hops <= this->two_hops_lim) {
+            } else if (two_hops < this->two_hops_lim) {
               auto iter = this->delete_cache_.find(id);
-              auto sz = iter->second.first;
-              auto ne = iter->second.second;
-              for (_u32 i = 0; i < sz && two_hops <= this->two_hops_lim; i++) {
-                if (visited.find(ne[i]) == visited.end() &&
-                    !this->del_filter_.get(ne[i])) {
-                  n_ids.push_back(ne[i]);
+              auto &vec = iter->second;
+              for (auto nei : vec) {
+                if (two_hops >= this->two_hops_lim) break;
+                if (visited.find(nei) == visited.end() && !this->del_filter_.get(nei)) {
+                  n_ids.push_back(nei);
+                  visited.insert(nei);
                   two_hops++;
-                  visited.insert(ne[i]);
                 }
               }
             }
@@ -785,13 +829,14 @@ namespace diskann {
           auto iter = this->insert_edges_.find(frontier_nhood.first);
           if (iter != this->insert_edges_.end()) {
             for (auto id : iter->second) {
-              if (visited.find(id) != visited.end() && this->del_filter_.get(id)) continue;
+              if (visited.find(id) != visited.end() && del_filter_.get(id)) continue;
               n_ids.emplace_back(id);
               visited.insert(id);
+              assert(id < this->cur_max_id_);
             }
           }
         }
-        // assert(n_ids.size() < maxc);
+        assert(n_ids.size() < maxc);
         cpu_timer.reset();
         compute_dists(n_ids.data(), n_ids.size(), dist_scratch);
         if (stats != nullptr) {
@@ -825,6 +870,7 @@ namespace diskann {
         // std::cout << n_ids.size() << std::endl;
         n_ids.clear();
       }
+      printf("Release delete_cache_lock_ in search.\n");
       }
       // update best inserted position
       //
@@ -960,108 +1006,140 @@ namespace diskann {
   }
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::ProcessPage(_u64 sector_id, UpdateThreadData<T> *upd) {
+    std::unique_lock<std::mutex> write_guard(page_locks_write_[sector_id & (kPageLocks - 1)]);
     char *sector_buf = upd->scratch.page_buf_;
     char *tmp_buf = upd->scratch.page_buf_copied_;
+    assert(sector_buf != nullptr);
+    assert(tmp_buf != nullptr);
     memcpy(tmp_buf, sector_buf, SECTOR_LEN);
     assert(sector_id != 0);
     _u32 cur_node_id = (sector_id - 1) * this->nnodes_per_sector;
     std::vector<DiskNode<T>> disk_nodes;
     for (uint32_t i = 0; i < this->nnodes_per_sector && cur_node_id < this->num_points; i++) {
+      char *node_disk_buf = OFFSET_TO_NODE(sector_buf, cur_node_id);
       disk_nodes.emplace_back(cur_node_id, 
-                              OFFSET_TO_NODE_COORDS(sector_buf),
-                              OFFSET_TO_NODE_NHOOD(sector_buf));
+                              OFFSET_TO_NODE_COORDS(node_disk_buf),
+                              OFFSET_TO_NODE_NHOOD(node_disk_buf));
       cur_node_id++;
     }
     std::vector<_u32> del_nbrs;
+    bool dump_flag = false;
     for (auto &disk_node : disk_nodes) {
-      // if (del_filter_.get(disk_node.id)) {
-      //   std::shared_lock<std::shared_mutex> insert_guard(this->insert_edges_lock_);
-      //   disk_node.nnbr = 0;
-      //   auto iter = this->insert_edges_.find(disk_node.id);
-      //   if (iter != this->insert_edges_.end()) {
-      //     this->insert_edges_.erase(iter);
-      //   }
-      //   auto 
-      //   continue;
-      // }
-      std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
+      
       auto      id = disk_node.id;
+      bool      change = false;
       auto      nnbrs = disk_node.nnbrs;
       unsigned *nbrs = disk_node.nbrs;
       std::vector<_u32> new_nbrs;
-      bool change = false;
-      for (uint32_t i = 0; i < nnbrs; i++) {
-        if (!del_filter_.get(nbrs[i])) {
-          new_nbrs.emplace_back(nbrs[i]);
-        } else {
-          // if (--mark[nbrs[i]] == 0) ... (atomic)
-          change = true;
-          del_nbrs.emplace_back(nbrs[i]);
-          auto iter = this->delete_cache_.find(nbrs[i]);
-          auto m = iter->second.first;
-          auto nei = iter->second.second;
-          for (_u32 j = 0; j < m; j++) {
-            if (!del_filter_.get(nei[j])) {
-              new_nbrs.emplace_back(nei[j]);
+      std::vector<_u32> old_nbrs;
+      {
+        std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
+        if (del_filter_.get(disk_node.id)) {
+          continue;
+        }
+        old_nbrs = std::vector<_u32>(nbrs, nbrs + nnbrs);
+        // std::cout << id << " ";
+        for (uint32_t i = 0; i < nnbrs; i++) {
+          if (!del_filter_.get(nbrs[i])) {
+            new_nbrs.emplace_back(nbrs[i]);
+          } else {
+            // if (--mark[nbrs[i]] == 0) ... (atomic)
+            change = true;
+            del_nbrs.emplace_back(nbrs[i]);
+            auto iter = this->delete_cache_.find(nbrs[i]);
+            assert(iter != this->delete_cache_.end());
+            auto &vec = iter->second;
+            for (auto j : vec) {
+              if (!del_filter_.get(j)) {
+                new_nbrs.emplace_back(j);
+              }
             }
           }
         }
       }
-      auto iter = this->insert_edges_.find(id);
-      if (iter != insert_edges_.end()) {
-        change = true;
-        for (auto nbrs : iter->second) {
-          if (del_filter_.get(nbrs)) 
-            continue;
-          new_nbrs.emplace_back(nbrs);
+      // printf("New nbrs size %lu\n", new_nbrs.size());
+      {
+        std::unique_lock<std::shared_mutex> guard(insert_edges_lock_);
+        std::shared_lock<std::shared_mutex> delete_guard(this->delete_cache_lock_);
+        auto iter = this->insert_edges_.find(id);
+        if (iter != insert_edges_.end()) {
+          change = true;
+          for (auto nbrs : iter->second) {
+            if (del_filter_.get(nbrs)) 
+              continue;
+            new_nbrs.emplace_back(nbrs);
+            old_nbrs.emplace_back(nbrs);
+          }
+          this->insert_edges_.erase(iter);
         }
-        this->insert_edges_.erase(iter);
       }
       if (change) {
         uint8_t *scratch = upd->scratch.scratch_;
         uint16_t *scratch_u16 = upd->scratch.scratch_u16_;
         PruneNeighbors(disk_node, new_nbrs, scratch, scratch_u16);
+        dump_flag = true;
+        char *node_disk_buf = OFFSET_TO_NODE(sector_buf, disk_node.id);
+        auto new_disk_node = DiskNode<T>(disk_node.id, 
+                                    OFFSET_TO_NODE_COORDS(node_disk_buf),
+                                    OFFSET_TO_NODE_NHOOD(node_disk_buf));
+        auto      new_nnbrs = new_disk_node.nnbrs;
+        unsigned *new_nbrs = new_disk_node.nbrs;
+        std::unique_lock<std::shared_mutex> in_degree_guard(this->in_degree_lock_);
+        for (uint32_t i = 0; i < new_nnbrs; i++) {
+          this->in_degree_[new_nbrs[i]]++;
+        }
+        for (auto id : old_nbrs) {
+          this->in_degree_[id]--;
+          CheckAndRecycle(id);
+        }
       }
+      // printf("change: %d\n", change);
     }
-    {
-      std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
-      page_cache_.insert(std::make_pair(sector_id, tmp_buf));
-    }
+    // {
+    //   std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
+    //   page_cache_.insert(std::make_pair(sector_id, tmp_buf));
+    // }
     /* write on page[sector_id] */
-    std::fstream &output_writer = *upd->output_writer;
-    // output_writer.open(this->disk_index_file, std::ios::out | std::ios::binary);
-    this->dump_to_disk(output_writer, (sector_id - 1) * this->nnodes_per_sector, sector_buf, 1);
-    output_writer.flush();
-    {
-      std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
-      page_cache_.erase(sector_id);
+    assert(upd->output_writer != nullptr);
+    if (dump_flag) {
+      std::fstream &output_writer = *upd->output_writer;
+      std::unique_lock<std::shared_mutex> read_guard(page_locks_read_[sector_id & (kPageLocks - 1)]);
+      this->dump_to_disk(output_writer, (sector_id - 1) * this->nnodes_per_sector, sector_buf, 1);
+      output_writer.flush();
     }
+    {
+      std::unique_lock<std::shared_mutex> guard(this->page_in_process_lock_);
+      page_in_process_.erase(page_in_process_.find(sector_id));
+    }
+    // {
+    //   std::unique_lock<std::shared_mutex> page_cache_guard(this->page_cache_lock_);
+    //   page_cache_.erase(sector_id);
+    // }
     /* Finish updating */
-    auto pair = std::make_pair(sector_buf, tmp_buf);
+    auto pair = PagePair(sector_buf, tmp_buf);
     this->page_pairs_queue_.push(pair);
     this->page_pairs_queue_.push_notify_all();
     this->scratch_queue_.push(*upd);
     this->scratch_queue_.push_notify_all();
-    {
-      std::unique_lock<std::shared_mutex> guard(this->in_degree_lock_);
-      for (auto id : del_nbrs) {
-        auto iter = in_degree_cnt_.find(id);
-        if (iter->second <= 1) {
-          in_degree_cnt_.erase(iter);
-          std::unique_lock<std::shared_mutex> del_guard(this->delete_cache_lock_);
-          auto d_iter = delete_cache_.find(id);
-          delete[] d_iter->second.second;
-          delete_cache_.erase(d_iter);
-        } else {
-          in_degree_cnt_.insert(std::make_pair(id, iter->second - 1));
-        }
-      }
-    }
+    // {
+    //   std::unique_lock<std::shared_mutex> guard(this->in_degree_lock_);
+    //   for (auto id : del_nbrs) {
+    //     auto iter = in_degree_cnt_.find(id);
+    //     if (iter->second <= 1) {
+    //       in_degree_cnt_.erase(iter);
+    //       std::unique_lock<std::shared_mutex> del_guard(this->delete_cache_lock_);
+    //       auto d_iter = delete_cache_.find(id);
+    //       delete_cache_.erase(d_iter);
+    //     } else {
+    //       in_degree_cnt_.insert(std::make_pair(id, iter->second - 1));
+    //     }
+    //   }
+    // }
   }
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::PushVisitedPage(_u64 sector_id, char *sector_buf) {
     /* copy buffers */
-    std::pair<char*, char*> pair = this->page_pairs_queue_.pop();
+    auto pair = this->page_pairs_queue_.pop();
     while (pair.first == nullptr) {
       this->page_pairs_queue_.wait_for_push_notify();
       pair = this->page_pairs_queue_.pop();
@@ -1075,7 +1153,17 @@ namespace diskann {
     data.scratch.page_buf_ = pair.first;
     data.scratch.page_buf_copied_ = pair.second;
     memcpy(data.scratch.page_buf_, sector_buf, SECTOR_LEN);
-    auto new_req = std::make_pair(sector_id, &data);
+        // std::cout << (pair.first == nullptr) << std::endl;
+    _u32 cur_node_id = (sector_id - 1) * this->nnodes_per_sector;
+    std::vector<DiskNode<T>> disk_nodes;
+    for (uint32_t i = 0; i < this->nnodes_per_sector && cur_node_id < this->num_points; i++) {
+      char *node_disk_buf = OFFSET_TO_NODE(data.scratch.page_buf_, cur_node_id);
+      disk_nodes.emplace_back(cur_node_id, 
+                              OFFSET_TO_NODE_COORDS(node_disk_buf),
+                              OFFSET_TO_NODE_NHOOD(node_disk_buf));
+      cur_node_id++;
+    }
+    Requests<T> new_req(sector_id, std::move(data));
     // std::cout << reqs_queue_.size() << std::endl;
     reqs_queue_.push(new_req);
     reqs_queue_.push_notify_all();
@@ -1084,32 +1172,42 @@ namespace diskann {
   void FreshPQFlashIndex<T, TagT>::ProcessUpdateRequests(bool update_flag) {
     /* Get a request */
     auto req = this->reqs_queue_.pop();
-    while (update_flag && req.second == nullptr) {
+    while (update_flag && req.sector_id == 0) {
       this->reqs_queue_.wait_for_push_notify();
       req = this->reqs_queue_.pop();
     }
-    // std::cout << req.first << std::endl;
+    // std::cout << req.sector_id << std::endl;
+    _u32 cur_node_id = (req.sector_id - 1) * this->nnodes_per_sector;
+    std::vector<DiskNode<T>> disk_nodes;
+    for (uint32_t i = 0; i < this->nnodes_per_sector && cur_node_id < this->num_points; i++) {
+      char *node_disk_buf = OFFSET_TO_NODE(req.upd.scratch.page_buf_, cur_node_id);
+      disk_nodes.emplace_back(cur_node_id, 
+                              OFFSET_TO_NODE_COORDS(node_disk_buf),
+                              OFFSET_TO_NODE_NHOOD(node_disk_buf));
+      cur_node_id++;
+    }
     if (!update_flag) {
       return ;
     }
     /* Check if a page is already in processing */
     {
       std::unique_lock<std::shared_mutex> guard(this->page_in_process_lock_);
-      if (page_in_process_.find(req.first) != page_in_process_.end()) {
+      if (page_in_process_.find(req.sector_id) != page_in_process_.end()) {
         return ;
       } else {
-        page_in_process_.insert(req.first);
+        page_in_process_.insert(req.sector_id);
       }
     }
     /* Process a page */
-    ProcessPage(req.first, req.second);
+    // std::cout << "Into page processing ..." << std::endl;
+    ProcessPage(req.sector_id, &req.upd);
   }
   template<typename T, typename TagT>
   void FreshPQFlashIndex<T, TagT>::PushDelete(_u32 external_id) { // need to set delete filter
     /* Read then process*/
     _u32 internal_id = this->inv_tags[external_id];
     /* Read */
-    std::pair<char*, char*> pair = this->page_pairs_queue_.pop();
+    auto pair = this->page_pairs_queue_.pop();
     while (pair.first == nullptr) {
       this->page_pairs_queue_.wait_for_push_notify();
       pair = this->page_pairs_queue_.pop();
@@ -1120,27 +1218,46 @@ namespace diskann {
       data = this->scratch_queue_.pop();
     }
     IOContext ctx = data.ctx;
-    std::vector<AlignedRead> read_reqs;
-    read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, pair.first);
-    this->reader->read(read_reqs, ctx);
+    printf("Internal: %u\n", internal_id);
+    {
+      std::shared_lock<std::shared_mutex> guard(page_locks_read_[NODE_SECTOR_NO(((size_t) internal_id)) & (kPageLocks - 1)]);
+      std::vector<AlignedRead> read_reqs;
+      read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, pair.first);
+      this->reader->read(read_reqs, ctx);
+    }
+    printf("Exit1: %u\n", internal_id);
     char *node_disk_buf =
           OFFSET_TO_NODE(pair.first, internal_id);
     unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
     _u64      nnbrs = (_u64)(*node_buf);
     unsigned *node_nbrs = (node_buf + 1);
-    unsigned *node_nbrs_copied = new unsigned[nnbrs];
-    memcpy(node_nbrs_copied, node_nbrs, sizeof(unsigned) * nnbrs);
-    {
-      std::unique_lock<std::shared_mutex> guard(delete_cache_lock_);
-      delete_cache_.insert(std::make_pair(internal_id, std::make_pair(nnbrs, node_nbrs_copied)));
-      this->del_filter_.set(internal_id);
-    }
+    std::vector<_u32> new_nbrs(node_nbrs, node_nbrs + nnbrs);
     {
       std::unique_lock<std::shared_mutex> guard(in_degree_lock_);
       for (_u64 i = 0; i < nnbrs; i++) {
         this->in_degree_[node_nbrs[i]]--;
+        CheckAndRecycle(node_nbrs[i]);
+      }
+      std::unique_lock<std::shared_mutex> insert_edges_guard(insert_edges_lock_);
+      auto iter = insert_edges_.find(internal_id);
+      if (iter != insert_edges_.end()) {
+        for (auto id : iter->second) {
+          this->in_degree_[id]--;
+          CheckAndRecycle(id);
+          new_nbrs.push_back(id);
+        }
+        insert_edges_.erase(iter);
       }
     }
+    printf("Exit2: %u\n", internal_id);
+    {
+      std::unique_lock<std::shared_mutex> guard(delete_cache_lock_);
+      printf("Exit3: %u\n", internal_id);
+      delete_cache_.insert(std::make_pair(internal_id, std::move(new_nbrs)));
+      printf("Exit4: %u\n", internal_id);
+      this->del_filter_.set(internal_id);
+    }
+    printf("Exit5: %u\n", internal_id);
     this->scratch_queue_.push(data);
     this->scratch_queue_.push_notify_all();
     this->page_pairs_queue_.push(pair);
@@ -1154,6 +1271,7 @@ namespace diskann {
   void FreshPQFlashIndex<T, TagT>::PushInsert(_u32 external_id, T *point) {
     /* Assign an internal id & update tags */
     _u32 internal_id = GetInternalId();
+    assert(1000 <= internal_id && internal_id < 10000);
     this->tags[internal_id] = external_id;
     this->inv_tags[external_id] = internal_id;
     std::vector<uint8_t> pq_coords = this->deflate_vector(point);
@@ -1175,7 +1293,7 @@ namespace diskann {
     // insert_edges_.insert(std::make_pair(internal_id, std::move(insertions)));
 
     /* Add edges */
-    std::pair<char*, char*> pair = this->page_pairs_queue_.pop();
+    auto pair = this->page_pairs_queue_.pop();
     while (pair.first == nullptr) {
       this->page_pairs_queue_.wait_for_push_notify();
       pair = this->page_pairs_queue_.pop();
@@ -1186,27 +1304,35 @@ namespace diskann {
       data = this->scratch_queue_.pop();
     }
     IOContext ctx = data.ctx;
-    std::vector<AlignedRead> read_reqs;
-    read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, pair.first);
-    this->reader->read(read_reqs, ctx);
-    char *node_disk_buf =
-          OFFSET_TO_NODE(pair.first, internal_id);
-    T        *vec_buf = OFFSET_TO_NODE_COORDS(node_disk_buf);
-    unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
-    memcpy(vec_buf, point, sizeof(T) * this->data_dim);
-    DiskNode<T> disk_node(internal_id, vec_buf, node_buf);
-    PruneNeighbors(disk_node, insertions, data.scratch.scratch_, data.scratch.scratch_u16_);
-    std::fstream &output_writer = *data.output_writer;
-    // output_writer.open(this->disk_index_file, std::ios::out | std::ios::binary);
-    this->dump_to_disk(output_writer, (NODE_SECTOR_NO(internal_id) - 1) * this->nnodes_per_sector, pair.first, 1);
-    output_writer.flush();
+    T        *vec_buf;
+    unsigned *node_buf;
     {
-      std::unique_lock<std::shared_mutex> guard(insert_edges_lock_);
+      std::unique_lock<std::mutex> write_guard(page_locks_write_[NODE_SECTOR_NO(((size_t) internal_id)) & (kPageLocks - 1)]);
+      std::vector<AlignedRead> read_reqs;
+      read_reqs.emplace_back(NODE_SECTOR_NO(((size_t) internal_id)) * SECTOR_LEN, SECTOR_LEN, pair.first);
+      this->reader->read(read_reqs, ctx);
+      char *node_disk_buf =
+            OFFSET_TO_NODE(pair.first, internal_id);
+      vec_buf = OFFSET_TO_NODE_COORDS(node_disk_buf);
+      node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
+      memcpy(vec_buf, point, sizeof(T) * this->data_dim);
+      DiskNode<T> disk_node(internal_id, vec_buf, node_buf);
+      PruneNeighbors(disk_node, insertions, data.scratch.scratch_, data.scratch.scratch_u16_);
+      std::fstream &output_writer = *data.output_writer;
+      std::unique_lock<std::shared_mutex> read_guard(page_locks_read_[NODE_SECTOR_NO(((size_t) internal_id)) & (kPageLocks - 1)]);
+      this->dump_to_disk(output_writer, (NODE_SECTOR_NO(internal_id) - 1) * this->nnodes_per_sector, pair.first, 1);
+      output_writer.flush();
+    }
+    {
+      std::unique_lock<std::shared_mutex> insert_edges_guard(insert_edges_lock_);
+      std::unique_lock<std::shared_mutex> in_degree_guard(in_degree_lock_);
       _u64      nnbrs = (_u64)(*node_buf);
       unsigned *node_nbrs = (node_buf + 1);
+      in_degree_[internal_id] += nnbrs;
       for (_u64 i = 0; i < nnbrs; i++) {
         // std::cout << node_nbrs[i] << " ";
         insert_edges_[node_nbrs[i]].emplace_back(internal_id);
+        in_degree_[node_nbrs[i]]++;
       }
       // std::cout << std::endl;
     }

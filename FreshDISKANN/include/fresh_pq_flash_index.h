@@ -14,6 +14,19 @@ namespace diskann {
     IOContext        ctx;
     std::fstream*    output_writer = nullptr;
   };
+  template<typename T>
+  struct Requests {
+    _u64 sector_id = 0;
+    UpdateThreadData<T> upd;
+    Requests(_u64 i, const UpdateThreadData<T> &u) : sector_id(i), upd(u) {}
+    Requests () {}
+  };
+  struct PagePair {
+    char *first = nullptr;
+    char *second = nullptr;
+    PagePair(char *f, char *s) : first(f), second(s) {}
+    PagePair () {}
+  };
   template<typename T, typename TagT = uint32_t>
   class FreshPQFlashIndex : public PQFlashIndex<T, TagT> {
    public:
@@ -75,19 +88,32 @@ namespace diskann {
       std::unique_lock<std::mutex> guard(free_ids_lock_);
       free_ids_.emplace_back(internal_id);
     }
+    void CheckAndRecycle(_u32 internal_id) {
+      if (del_filter_.get(internal_id) && 
+          !in_degree_[internal_id]) {
+        std::unique_lock<std::shared_mutex> guard(delete_cache_lock_);
+        // RecycleId(internal_id);
+        // del_filter_.reset(internal_id);
+        auto iter = delete_cache_.find(internal_id);
+        assert(iter != delete_cache_.end());
+        delete_cache_.erase(iter);
+      }
+    }
     void ComputeInDegree();
     void SetParameters() {
       //
     }
     void SetUpdateThread(bool &update_flag) {
       while (update_flag) {
+        // std::cout << 1 << std::endl;
         ProcessUpdateRequests(update_flag);
       }
     }
    private:
     // Variables for deletion
     std::shared_mutex delete_cache_lock_;
-    tsl::robin_map<_u32, std::pair<_u32, const _u32 *>> delete_cache_;
+    // tsl::robin_map<_u32, std::pair<_u32, const _u32 *>> delete_cache_;
+    tsl::robin_map<_u32, std::vector<_u32>> delete_cache_;
     const uint64_t MAX_NODE_NUMBER = uint64_t(10000005);    //
     Bitset<uint64_t> del_filter_ = Bitset(MAX_NODE_NUMBER); // May need to be modified.
     _u32 two_hops_lim;
@@ -95,7 +121,7 @@ namespace diskann {
     std::shared_mutex insert_edges_lock_;
     tsl::robin_map<_u32, std::vector<_u32>> insert_edges_;
     // Variables for pruning
-    const size_t maxc = 750, range = 64, l_index = 75, beam_width = 4;
+    const size_t maxc = 750, range = 64, l_index = 75, beam_width = 1;
     const float alpha = 1.2;
 
     // Variables for page caching
@@ -103,9 +129,9 @@ namespace diskann {
     tsl::robin_map<_u64, char *> page_cache_;
     // VisitedList del_filter_ = VisitedList(MAX_NODE_NUMBER);
 
-    ConcurrentQueue<std::pair<_u64, UpdateThreadData<T>* >> reqs_queue_;
-    ConcurrentQueue<UpdateThreadData<T>>        scratch_queue_;
-    ConcurrentQueue<std::pair<char*, char* >>   page_pairs_queue_;
+    ConcurrentQueue<Requests<T>>             reqs_queue_;
+    ConcurrentQueue<UpdateThreadData<T>>     scratch_queue_;
+    ConcurrentQueue<PagePair>                page_pairs_queue_;
     tsl::robin_set<_u64>                     page_in_process_;
     std::shared_mutex                        page_in_process_lock_;
 
@@ -127,13 +153,8 @@ namespace diskann {
     uint32_t background_threads_num_;
     // std::shared_ptr<AlignedFileReader> fresh_reader = nullptr;
     // May need to be added
-  };
-  template<typename T>
-  class Updater {
-   public:
-    std::shared_mutex delete_cache_lock_;
-    tsl::robin_map<_u32, std::pair<_u32, const _u32 *>> delete_cache_;
-    tsl::robin_map<_u64, char *> page_in_use;
-
+    const uint32_t kPageLocks = 65536 * 2;
+    mutable std::vector<std::mutex>        page_locks_write_;
+    mutable std::vector<std::shared_mutex> page_locks_read_;
   };
 }  // namespace diskann

@@ -26,7 +26,7 @@
 #define RED "\033[31m" /*  Red  */
 #define NUM_INSERT_THREADS 3
 #define NUM_DELETE_THREADS 1
-#define NUM_SEARCH_THREADS 2
+#define NUM_SEARCH_THREADS 1
 
 // random number generator
 std::random_device dev;
@@ -252,6 +252,7 @@ void search_kernel(diskann::IndexUpdater<T> &index_updater,
 //       s = std::chrono::high_resolution_clock::now();
 // #pragma omp              parallel for num_threads(NUM_SEARCH_THREADS)
 //       for (_s64 i = 0; i < (int64_t) query_num; i++) {
+//         // printf("Query %lld\n", i);
 //         auto qs = std::chrono::high_resolution_clock::now();
 //         {
 //             std::lock_guard guard(active_mux);
@@ -315,91 +316,93 @@ void search_kernel(diskann::IndexUpdater<T> &index_updater,
 template<typename T, typename TagT = uint32_t>
 void insertion_kernel(diskann::IndexUpdater<T, TagT> &index_updater,
                       std::string mem_pts_file, std::string mem_tags_file) {
-  if (::_insertions_done.load()) {
-    std::cout << "Insertions_done is true at the beginning of insertion kernel"
-              << std::endl;
-    exit(-1);
-  }
-  std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-  T *    data_insert = nullptr;
-  size_t npts, ndim, aligned_dim;
-  diskann::load_aligned_bin<T>(mem_pts_file, data_insert, npts, ndim,
-                               aligned_dim);
-  size_t tag_num, tag_dim;
-  TagT * tag_data;
-  diskann::load_bin<TagT>(mem_tags_file, tag_data, tag_num, tag_dim);
-  if (tag_num != npts) {
-    std::cout << "In insertion_kernel(), number of tags loaded is not equal to "
-                 "number of points loaded. Exiting....."
-              << std::endl;
-    exit(-1);
-  }
-  std::vector<double> insert_latencies(npts, 0);
-  diskann::Timer      timer;
-// #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
-//   for (size_t i = 0; i < npts; i++) {
-//     int            percentile = 0;
-//     diskann::Timer insert_timer;
-//     if (merge_insert.insert(data_insert + i * aligned_dim, tag_data[i],
-//                             percentile) == 0) {
-//       insert_latencies[i] = ((double) insert_timer.elapsed());
-//     } else {
-//       std::cout << "Point " << i << "could not be inserted." << std::endl;
-//     }
-//     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-//     if ((i % 1000000 == 0) && (i > 0))
-//       std::cout << "Inserted another 1M points" << std::endl;
+//   if (::_insertions_done.load()) {
+//     std::cout << "Insertions_done is true at the beginning of insertion kernel"
+//               << std::endl;
+//     exit(-1);
 //   }
+//   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+//   T *    data_insert = nullptr;
+//   size_t npts, ndim, aligned_dim;
+//   diskann::load_aligned_bin<T>(mem_pts_file, data_insert, npts, ndim,
+//                                aligned_dim);
+//   size_t tag_num, tag_dim;
+//   TagT * tag_data;
+//   diskann::load_bin<TagT>(mem_tags_file, tag_data, tag_num, tag_dim);
+//   if (tag_num != npts) {
+//     std::cout << "In insertion_kernel(), number of tags loaded is not equal to "
+//                  "number of points loaded. Exiting....."
+//               << std::endl;
+//     exit(-1);
+//   }
+//   std::vector<double> insert_latencies(npts, 0);
+//   diskann::Timer      timer;
+// // #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
+// //   for (size_t i = 0; i < npts; i++) {
+// //     int            percentile = 0;
+// //     diskann::Timer insert_timer;
+// //     if (merge_insert.insert(data_insert + i * aligned_dim, tag_data[i],
+// //                             percentile) == 0) {
+// //       insert_latencies[i] = ((double) insert_timer.elapsed());
+// //     } else {
+// //       std::cout << "Point " << i << "could not be inserted." << std::endl;
+// //     }
+// //     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+// //     if ((i % 1000000 == 0) && (i > 0))
+// //       std::cout << "Inserted another 1M points" << std::endl;
+// //   }
 
-  for (size_t i = 0; i < npts; i += NUM_INSERT_THREADS) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    std::lock_guard guard(::active_mux);
-    size_t lim = std::min(size_t(NUM_INSERT_THREADS), npts - i);
-#pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
-    for (size_t j = 0; j < lim; j++) {
-      diskann::Timer insert_timer;
-      if (index_updater.insert(data_insert + (i + j) * aligned_dim, tag_data[i + j]) == 0) {
-        insert_latencies[i + j] = ((double) insert_timer.elapsed());
-      } else {
-        std::cout << "Point " << i + j << "could not be inserted." << std::endl;
-      }
-      if (((i + j) % 1000000 == 0) && (i + j > 0))
-        std::cout << "Inserted another 1M points" << std::endl;
-    }
-    for (size_t j = 0; j < lim; j++) {
-      ::inactive_tags.erase(tag_data[i + j]);
-    }
-  }
-  std::sort(insert_latencies.begin(), insert_latencies.end());
-  std::cout << "Mem index insertion time : " << timer.elapsed() / 1000 << " ms"
-            << std::endl
-            << "10th percentile insertion time : "
-            << insert_latencies[0.10 * npts] << " microsec" << std::endl
-            << "50th percentile insertion time : "
-            << insert_latencies[0.5 * npts] << " microsec"
-            << "90th percentile insertion time : "
-            << insert_latencies[0.90 * npts] << " microsec" << std::endl;
+//   for (size_t i = 0; i < npts; i += NUM_INSERT_THREADS) {
+//     // std::this_thread::sleep_for(std::chrono::milliseconds(15));
+//     std::lock_guard guard(::active_mux);
+//     size_t lim = std::min(size_t(NUM_INSERT_THREADS), npts - i);
+// #pragma omp           parallel for num_threads(NUM_INSERT_THREADS)
+//     for (size_t j = 0; j < lim; j++) {
+//       diskann::Timer insert_timer;
+//       if (index_updater.insert(data_insert + (i + j) * aligned_dim, tag_data[i + j]) == 0) {
+//         insert_latencies[i + j] = ((double) insert_timer.elapsed());
+//       } else {
+//         std::cout << "Point " << i + j << "could not be inserted." << std::endl;
+//       }
+//       if (((i + j) % 1000000 == 0) && (i + j > 0))
+//         std::cout << "Inserted another 1M points" << std::endl;
+//     }
+//     for (size_t j = 0; j < lim; j++) {
+//       // std::cout << tag_data[i + j] << " ";
+//       ::inactive_tags.erase(tag_data[i + j]);
+//     }
+//     // std::cout << '\n';
+//   }
+//   std::sort(insert_latencies.begin(), insert_latencies.end());
+//   std::cout << "Mem index insertion time : " << timer.elapsed() / 1000 << " ms"
+//             << std::endl
+//             << "10th percentile insertion time : "
+//             << insert_latencies[0.10 * npts] << " microsec" << std::endl
+//             << "50th percentile insertion time : "
+//             << insert_latencies[0.5 * npts] << " microsec"
+//             << "90th percentile insertion time : "
+//             << insert_latencies[0.90 * npts] << " microsec" << std::endl;
+// delete[] data_insert;
+// delete[] tag_data;
   ::_insertions_done.store(true);
-  delete[] data_insert;
-  delete[] tag_data;
 }
 template<typename T, typename TagT = uint32_t>
 void deletion_kernel(diskann::IndexUpdater<T, TagT> &index_updater,
                      tsl::robin_set<uint32_t> del_tags) {
-//   if (::_del_done.load()) {
-//     std::cout << "_del_done is already true" << std::endl;
-//     exit(-1);
-//   }
-//   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-//   diskann::Timer timer;
-//   for (auto iter : del_tags) {
-//     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-//     index_updater.remove(iter);
-//     std::lock_guard guard(active_mux);
-//     ::inactive_tags.insert(iter);
-//   }
-//   std::cout << "Deletion time : " << timer.elapsed() / 1000 << " ms"
-//             << std::endl;
+  if (::_del_done.load()) {
+    std::cout << "_del_done is already true" << std::endl;
+    exit(-1);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+  diskann::Timer timer;
+  for (auto iter : del_tags) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    index_updater.remove(iter);
+    std::lock_guard guard(active_mux);
+    ::inactive_tags.insert(iter);
+  }
+  std::cout << "Deletion time : " << timer.elapsed() / 1000 << " ms"
+            << std::endl;
   ::_del_done.store(true);
 }
 
@@ -516,8 +519,8 @@ void run_all_iters(std::string &base_prefix,
 //                       params[std::string("disk_search_nthreads")]);
 
   diskann::IndexUpdater<T, TagT> index_updater(
-      base_prefix.c_str(), dist_cmp, 4, 64, 75, 1.2, 750);
-  index_updater.UpdateThreadSetup(5);
+      base_prefix.c_str(), dist_cmp, 1, 64, 75, 1.2, 750);
+  index_updater.UpdateThreadSetup(2);
   for (int i = 0; i < n_iters; i++) {
     std::cout << "ITER : " << i << std::endl;
     if (i == 0) 
@@ -597,7 +600,7 @@ int main(int argc, char **argv) {
   // hard-coded params
 //   params[std::string("disk_search_node_cache_count")] = 100;
 //   params[std::string("disk_search_nthreads")] = 16;
-  params[std::string("beam_width")] = 4;
+  params[std::string("beam_width")] = 1;
 
   if (index_type == std::string("float")) {
     diskann::DistanceL2 dist_cmp;
