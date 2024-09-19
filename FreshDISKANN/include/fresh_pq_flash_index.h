@@ -97,6 +97,7 @@ namespace diskann {
         auto iter = delete_cache_.find(internal_id);
         assert(iter != delete_cache_.end());
         delete_cache_.erase(iter);
+        // printf("delete: %u\n", internal_id);
       }
     }
     void ComputeInDegree();
@@ -139,7 +140,20 @@ namespace diskann {
     _u32 *in_degree_;
     std::shared_mutex          in_degree_lock_;
     _u32 *inv_tags;
-
+    tsl::robin_set<_u32>       in_nodes[10005];
+    tsl::robin_set<_u32>       out_edges[10005];
+    _u32 last_hit[10005];
+    bool SetEqual(tsl::robin_set<_u32> &a, tsl::robin_set<_u32> &b) {
+      if (a.size() != b.size()) {
+        return false;
+      }
+      for (auto i : a) {
+        if (b.find(i) == b.end()) {
+          return false;
+        }
+      }
+      return true;
+    }
     std::vector<_u32>          free_ids_;
     std::mutex                 free_ids_lock_;
     _u32                       cur_max_id_;

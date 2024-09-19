@@ -49,7 +49,7 @@ namespace diskann {
     }
 
     // PUSH BACK
-    void push(T& new_val) {
+    void push(T &new_val) {
       mutex_locker lk(this->mut);
       this->q.push(new_val);
       lk.unlock();

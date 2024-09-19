@@ -520,7 +520,7 @@ void run_all_iters(std::string &base_prefix,
 
   diskann::IndexUpdater<T, TagT> index_updater(
       base_prefix.c_str(), dist_cmp, 1, 64, 75, 1.2, 750);
-  index_updater.UpdateThreadSetup(2);
+  index_updater.UpdateThreadSetup(1);
   for (int i = 0; i < n_iters; i++) {
     std::cout << "ITER : " << i << std::endl;
     if (i == 0) 
